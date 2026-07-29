@@ -19,7 +19,7 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Build dmftp
+      - name: Build dmftp and ftpd
         run: |
           mkdir -p build
           cd build
@@ -32,11 +32,20 @@ jobs:
           ls -lh build/dmf/
           test -f build/dmf/dmftp.dmf
           test -f build/dmf/dmftp_version.txt
+          test -f build/dmf/ftpd.dmf
+          test -f build/dmf/ftpd_version.txt
           test -f build/dmf/test_dmftp.dmf
+          test -f build/dmf/test_ftpd.dmf
           echo "Module files present"
 
+      # Both suites run, and each one's exit code is its number of failed
+      # steps (see dmod_add_test), so a plain `set -e` is enough to fail the
+      # job on any failing step.
       - name: Run tests with dmod_loader
         run: |
+          set -e
           export DMOD_DMF_DIR=$(pwd)/build/dmf
-          dmf-get install -d ${DMOD_DMF_DIR}/test_dmftp-local.dmd -y
-          dmod_loader build/dmf/test_dmftp.dmf
+          for suite in test_dmftp test_ftpd; do
+            dmf-get install -d ${DMOD_DMF_DIR}/${suite}-local.dmd -y
+            dmod_loader build/dmf/${suite}.dmf
+          done

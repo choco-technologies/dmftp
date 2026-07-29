@@ -1,0 +1,43 @@
+# DMOD Resource File for ftpd
+# This file specifies where resources should be installed
+#
+# NOTE: ${repo_dir}/${build_dir} are the top-level dmftp repo root and build
+# root, not this module's own directory - ftpd is built via
+# add_subdirectory() from the repository's top-level CMakeLists.txt, so
+# module-specific resources are given relative to the repo root (the same
+# pattern dmsystem/app/libsystemd/libsystemd.dmr documents for itself).
+# README.md and LICENSE are shared at the repo root and stay unprefixed.
+
+# === Core Module ===
+# Main module file - always installed
+dmf=./${module}.dmf => ${destination}/${module}.dmf [origin=${dmf_dir}/${module}.dmf]
+
+# Compressed module
+dmfc=./${module}.dmfc => ${destination}/${module}.dmfc [origin=${build_dir}/dmfc/${module}.dmfc]
+
+# Dependencies file (if exists)
+dmd=./${module}.dmd => ${destination}/${module}.dmd [origin=${dmf_dir}/${module}.dmd]
+
+# Version information
+version=./${module}_version.txt => ${destination}/${module}_version.txt [origin=${dmf_dir}/${module}_version.txt]
+
+# === Documentation ===
+# Module documentation in markdown format for dmf-man tool
+docs=./docs => ${destination}/${module}/docs [origin=${repo_dir}/app/ftpd/docs]
+
+# README file
+readme=./README.md => ${destination}/${module}/README.md [origin=${repo_dir}/README.md]
+
+# === Example configuration and unit file ===
+# Shipped rather than only documented: `ftpd.ini` is the file the service
+# reads at /etc/ftpd.ini, and `ftpd-unit.ini` is the systemd unit that
+# starts it - both are meant to be copied and edited, not written from
+# scratch.
+examples=./examples => ${destination}/${module}/examples [origin=${repo_dir}/app/ftpd/examples]
+
+# === License ===
+# License file
+license=./LICENSE => ${destination}/${module}/LICENSE [origin=${repo_dir}/LICENSE]
+
+# Adding itself
+dmr=./${module}.dmr => ${destination}/${module}/${module}.dmr [origin=${repo_dir}/app/ftpd/${module}.dmr]

@@ -16,18 +16,18 @@ version=./${module}_version.txt => ${destination}/${module}_version.txt [origin=
 
 # === Documentation ===
 # Module documentation in markdown format for dmf-man tool
-docs=./docs => ${destination}/${module}/docs [origin=${repo_dir}/docs]
+docs=./docs => ${destination}/${module}/docs [origin=${repo_dir}/app/dmftp/docs]
 
 # README file
 readme=./README.md => ${destination}/${module}/README.md [origin=${repo_dir}/README.md]
 
 # === Header Files ===
 # Include directory with all headers (public header + generated <module>_defs.h)
-inc=./include => ${destination}/${module}/include [origin=${repo_dir}/include] [origin=${build_dir}/${module}_defs.h]
+inc=./include => ${destination}/${module}/include [origin=${repo_dir}/app/dmftp/include] [origin=${build_dir}/app/dmftp/${module}_defs.h]
 
 # === License ===
 # License file
 license=./LICENSE => ${destination}/${module}/LICENSE [origin=${repo_dir}/LICENSE]
 
 # Adding itself
-dmr=./${module}.dmr => ${destination}/${module}/${module}.dmr [origin=${repo_dir}/${module}.dmr]
+dmr=./${module}.dmr => ${destination}/${module}/${module}.dmr [origin=${repo_dir}/app/dmftp/${module}.dmr]

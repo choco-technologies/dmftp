@@ -1,6 +1,7 @@
 # #############################################################################
-# 
-# 	This is an example of a simple library module.
+#
+# 	The ftpd application module - the FTP service front-end over dmftp.
+# 	The Make-based equivalent of this directory's CMakeLists.txt.
 #
 # #############################################################################
 DMOD_DIR=@DMOD_DIR@
@@ -15,7 +16,7 @@ include $(DMOD_DIR)/paths.mk
 # -----------------------------------------------------------------------------
 
 # The name of the module
-DMOD_MODULE_NAME=dmftp
+DMOD_MODULE_NAME=ftpd
 
 # The version of the module
 DMOD_MODULE_VERSION=0.1
@@ -24,13 +25,16 @@ DMOD_MODULE_VERSION=0.1
 DMOD_AUTHOR_NAME=Mikolaj Filar
 
 # The list of C sources
-DMOD_CSOURCES=src/dmftp.c
+DMOD_CSOURCES=src/ftpd.c
 
 # The list of C++ sources
 DMOD_CXXSOURCES=
 
 # The list of include directories
-DMOD_INC_DIRS=include
+#
+# ../dmftp/include: dmftp is a sibling module in this same repository, so its
+# public header comes straight from the source tree rather than from a fetch.
+DMOD_INC_DIRS=../dmftp/include
 
 # The list of libraries to link
 DMOD_LIBS=
@@ -51,4 +55,4 @@ DMOD_DIF_IMPLS=
 # -----------------------------------------------------------------------------
 #   Include the dmod app makefile
 # -----------------------------------------------------------------------------
-include $(DMOD_DMF_LIB_FILE_PATH)
+include $(DMOD_DMF_APP_FILE_PATH)

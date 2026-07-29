@@ -18,6 +18,9 @@ FetchContent_Declare(
     GIT_TAG        develop
 )
 
+# ============================================================================
+#   Configuration of DMOD
+# ============================================================================
 set(DMOD_MODE "DMOD_MODULE" CACHE STRING "DMOD build mode")
 set(DMOD_BUILD_TESTS OFF CACHE BOOL "Build tests")
 set(DMOD_BUILD_EXAMPLES OFF CACHE BOOL "Build examples")
@@ -27,54 +30,27 @@ set(DMOD_BUILD_TEMPLATES OFF CACHE BOOL "Build templates")
 FetchContent_MakeAvailable(dmod)
 
 project(dmftp VERSION ${DMOD_MODULE_VERSION}
-    DESCRIPTION "dmftp DMOD library module"
+    DESCRIPTION "FTP for DMOD: the dmftp protocol library and the ftpd service"
     LANGUAGES C CXX)
 
 set(DMOD_DIR ${dmod_SOURCE_DIR} CACHE PATH "DMOD source directory")
 set(DMOD_SCRIPTS_DIR ${DMOD_DIR}/scripts CACHE PATH "DMOD scripts directory")
 include(${DMOD_DIR}/paths.cmake)
+
 dmod_setup_external_module()
 
-# Name of the module
-set(DMOD_MODULE_NAME        dmftp)
+# Author of every module in this repository
+set(DMOD_AUTHOR_NAME "Mikolaj Filar")
 
-# Author (should be string)
-set(DMOD_AUTHOR_NAME        "Mikolaj Filar")
-
-# Stack size for the module (should be integer)
-set(DMOD_STACK_SIZE         1024)
-
-# Path to the .dmr file - enables release package creation in build/packages/
-set(DMOD_DMR_PATH           ${CMAKE_CURRENT_SOURCE_DIR}/dmftp.dmr)
-
-# List of MAL interfaces implemented by this module (leave empty if none)
-set(DMOD_MAL_IMPLS          )
-
-# List of DIF interfaces implemented by this module (leave empty if none)
-set(DMOD_DIF_IMPLS          )
-
-#
-#   dmod_add_library - create a library module
-#   it has the same signature as add_library
-#   and can be used in the same way after the creation
-#   (for example, to link libraries)
-#
-dmod_add_library(${DMOD_MODULE_NAME} ${DMOD_MODULE_VERSION}
-    # List of source files - can include C and C++ files
-    src/dmftp.c
-)
-
-target_include_directories(${DMOD_MODULE_NAME} PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}/include
-)
-
-target_include_directories(${DMOD_MODULE_NAME}_if INTERFACE
-    ${CMAKE_CURRENT_SOURCE_DIR}/include
-)
-
-# To depend on another module's headers, use:
-#   dmod_link_modules(${DMOD_MODULE_NAME}
-#       other_module@1.0
-#   )
 enable_testing()
-add_subdirectory(tests)
+
+# ============================================================================
+#   Subdirectories
+#
+#   This repo builds two modules (see README.md): the `dmftp` Library, which
+#   holds the protocol itself, and the `ftpd` Application, a thin service
+#   front-end that configures and runs a server from a unit file. Only a
+#   Library module can be enabled as a dependency of another module, which is
+#   why the protocol does not live inside `ftpd`.
+# ============================================================================
+add_subdirectory(app)

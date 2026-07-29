@@ -1,5 +1,12 @@
 # Include dynamically generated versions list from latest release
 $include https://github.com/choco-technologies/dmftp/releases/download/vlatest/versions.dmm
 
-# Module entry with version placeholder - expanded by $version-available
+# Module entries with version placeholder - expanded by $version-available.
+# This repo builds two modules (see README.md); the release workflow packages
+# and zips each one under its own module name, not the repo name.
 dmftp https://github.com/choco-technologies/dmftp/releases/download/v<version>/dmftp-v<version>-<arch_name>.zip
+ftpd https://github.com/choco-technologies/dmftp/releases/download/v<version>/ftpd-v<version>-<arch_name>.zip
+
+# Test applications
+test_dmftp https://github.com/choco-technologies/dmftp/releases/download/v<version>/test_dmftp-v<version>-<arch_name>.zip
+test_ftpd https://github.com/choco-technologies/dmftp/releases/download/v<version>/test_ftpd-v<version>-<arch_name>.zip
