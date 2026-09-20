@@ -60,8 +60,18 @@ set(DMOD_DIF_IMPLS          )
 #   (for example, to link libraries)
 #
 dmod_add_library(${DMOD_MODULE_NAME} ${DMOD_MODULE_VERSION}
-    # List of source files - can include C and C++ files
+    # src/dmftp.c: the transport-agnostic RFC 959 control-line engine
+    # (dmftp_create/_destroy/_recv/_reply - see include/dmftp.h).
+    # src/dmftp_server.c: dmtcp wiring (control-connection listener,
+    # connection table, PASV port bookkeeping) and config loading -
+    # dmod_init()/dmod_deinit() live here, since dmftp is a Library-type
+    # module started as a dmsystem "type=library" unit (see
+    # configs/ftpd.ini and docs/service.md), the same shape dmicmp uses.
+    # src/dmftp_commands.c: RFC 959 command handling, virtual-root path
+    # resolution, and PASV data-connection transfer (LIST/NLST/RETR/STOR).
     src/dmftp.c
+    src/dmftp_server.c
+    src/dmftp_commands.c
 )
 
 target_include_directories(${DMOD_MODULE_NAME} PRIVATE
@@ -72,9 +82,23 @@ target_include_directories(${DMOD_MODULE_NAME}_if INTERFACE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
 
-# To depend on another module's headers, use:
-#   dmod_link_modules(${DMOD_MODULE_NAME}
-#       other_module@1.0
-#   )
+# dmtcp/dmip/dmroute/dmnetif: the control/data TCP connections themselves
+#     (dmtcp_listen()/_listen_any()/_send()/... - dmip/dmroute/dmnetif are
+#     needed transitively for dmip_addr_t/dmnetif_iface_t, the same reason
+#     telnetd links all four for its own dmtcp usage - see
+#     https://github.com/choco-technologies/dmtelnet's tools/telnetd).
+# dmini: parses this server's own settings (port/root/user/pass) out of
+#     the same unit file dmsystem starts it from - see
+#     src/dmftp_server.c's load_config().
+# dmosi: the mutex guarding the connection table and PASV port bookkeeping.
+dmod_link_modules(${DMOD_MODULE_NAME}
+    dmtcp
+    dmip
+    dmroute
+    dmnetif
+    dmini
+    dmosi
+)
+
 enable_testing()
 add_subdirectory(tests)
