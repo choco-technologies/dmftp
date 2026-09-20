@@ -378,17 +378,14 @@ void dmftp_data_begin(dmftp_connection_t* c)
         break; /* Nothing to do yet - wait for dmftp_data_on_data() */
     case dmftp_data_op_none:
     default:
-    {
-        /* A stray data connection with no LIST/RETR/STOR waiting for it -
-         * clear our own pointer *before* aborting, so the resulting
-         * dmftp_data_on_reset() (its `c->data_conn != conn` guard sees
-         * them already unequal) does not send a spurious control reply
-         * for a transfer that was never requested. */
-        dmtcp_conn_t stray = c->data_conn;
-        c->data_conn = NULL;
-        dmtcp_abort(stray);
+        /* The data connection arrived before the LIST/RETR/STOR that will
+         * use it - real clients commonly connect PASV's data channel
+         * immediately after the 227 reply, before sending the command
+         * that actually needs it (this is the common case, not the
+         * exception). Leave it open and idle: cmd_list()/_retr()/_stor()
+         * call this same function again, with data_op now set, once that
+         * command arrives - see their own "c->data_conn != NULL" check. */
         break;
-    }
     }
 }
 
@@ -570,6 +567,15 @@ static void cmd_cwd(dmftp_connection_t* c, const char* arg)
 
 static void cmd_pasv(dmftp_connection_t* c)
 {
+    if (c->data_conn != NULL && c->data_op == dmftp_data_op_none)
+    {
+        /* A previous PASV's data connection arrived but was never claimed
+         * by a LIST/RETR/STOR - drop it rather than leaking it. */
+        dmtcp_conn_t stale = c->data_conn;
+        c->data_conn = NULL;
+        dmtcp_abort(stale);
+    }
+
     uint16_t port;
     if (dmftp_server_start_pasv(c, &port) != 0)
     {
@@ -595,7 +601,7 @@ static void cmd_pasv(dmftp_connection_t* c)
 
 static void cmd_list(dmftp_connection_t* c, const char* arg, dmftp_data_op_t op)
 {
-    if (!c->pasv_pending)
+    if (c->data_conn == NULL && !c->pasv_pending)
     {
         reply(c, 425, "Use PASV first");
         return;
@@ -629,11 +635,19 @@ static void cmd_list(dmftp_connection_t* c, const char* arg, dmftp_data_op_t op)
     c->list_len = len;
     c->list_sent = 0;
     reply(c, 150, "Here comes the directory listing");
+
+    /* The data connection may already be sitting there, idle, from a PASV
+     * accept that arrived before this command did (the common client
+     * ordering - see dmftp_data_begin()'s doc comment). If so, kick off
+     * sending right away instead of waiting for an accept that already
+     * happened. */
+    if (c->data_conn != NULL)
+        dmftp_data_begin(c);
 }
 
 static void cmd_retr(dmftp_connection_t* c, const char* arg)
 {
-    if (!c->pasv_pending)
+    if (c->data_conn == NULL && !c->pasv_pending)
     {
         reply(c, 425, "Use PASV first");
         return;
@@ -662,11 +676,16 @@ static void cmd_retr(dmftp_connection_t* c, const char* arg)
     c->data_op = dmftp_data_op_retr;
     c->transfer_file = file;
     reply(c, 150, "Opening binary mode data connection for file transfer");
+
+    /* See cmd_list()'s own comment on the data connection possibly already
+     * being there. */
+    if (c->data_conn != NULL)
+        dmftp_data_begin(c);
 }
 
 static void cmd_stor(dmftp_connection_t* c, const char* arg)
 {
-    if (!c->pasv_pending)
+    if (c->data_conn == NULL && !c->pasv_pending)
     {
         reply(c, 425, "Use PASV first");
         return;

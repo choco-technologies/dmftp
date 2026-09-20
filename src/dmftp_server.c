@@ -26,6 +26,20 @@
  * it be started/stopped as a dmsystem "type=library" unit - see
  * configs/ftpd.ini and docs/service.md.
  *
+ * Callback structs (dmftp_callbacks_t, dmtcp_conn_callbacks_t) are always
+ * built field-by-field here, never as a `{ .field = fn, ... }` compound
+ * literal, even though every other module in this ecosystem (telnetd.c
+ * included) uses that shorthand freely. Confirmed on real STM32F746G-DISCO
+ * hardware: GCC compiles a compound literal whose fields are function
+ * addresses as a small anonymous constant-data blob (loaded via a single
+ * PC-relative `ldmia`), and the dmod loader's relocation pass does not
+ * patch function-address entries living in a data blob like that for a
+ * position-independent .dmf - every function pointer built that way comes
+ * out as its raw, unrelocated link-time offset (a small integer, not a
+ * valid code address), and the first call through it hard-faults. Plain
+ * `x.field = fn;` assignments compile to ordinary PC-relative code that the
+ * loader does relocate correctly.
+ *
  * Known limitations (deliberately out of scope for this first version,
  * same spirit as telnetd.c's own documented limitations):
  *   - Active mode (PORT) is not implemented - only PASV. Most modern
@@ -242,13 +256,14 @@ static void pasv_on_accept(dmtcp_conn_t conn, const dmip_addr_t* peer, uint16_t 
     c->data_conn = conn;
     c->transfer_ok = false;
 
-    dmtcp_conn_callbacks_t callbacks = {
-        .on_data     = dmftp_data_on_data,
-        .on_writable = dmftp_data_on_writable,
-        .on_closed   = dmftp_data_on_closed,
-        .on_reset    = dmftp_data_on_reset,
-        .on_error    = dmftp_data_on_error,
-    };
+    /* Field-by-field - see the compound-literal warning in control_on_accept(). */
+    dmtcp_conn_callbacks_t callbacks;
+    memset(&callbacks, 0, sizeof(callbacks));
+    callbacks.on_data     = dmftp_data_on_data;
+    callbacks.on_writable = dmftp_data_on_writable;
+    callbacks.on_closed   = dmftp_data_on_closed;
+    callbacks.on_reset    = dmftp_data_on_reset;
+    callbacks.on_error    = dmftp_data_on_error;
     dmtcp_conn_set_callbacks(conn, &callbacks, c);
 
     dmftp_data_begin(c);
@@ -366,10 +381,16 @@ static void control_on_accept(dmtcp_conn_t conn, const dmip_addr_t* peer, uint16
     }
 
     c->cwd = Dmod_StrDup("/");
-    dmftp_callbacks_t engine_callbacks = {
-        .on_command = dmftp_handle_command,
-        .on_send    = dmftp_handle_engine_send,
-    };
+    /* Field-by-field, not a compound literal: see this file's top comment -
+     * a struct literal whose fields are function addresses gets compiled
+     * as a constant-data template that the loader's relocator does not
+     * patch for a position-independent .dmf, so every function pointer in
+     * it silently ends up as its unrelocated link-time offset instead of
+     * a real runtime address. Individual assignments avoid that codegen
+     * shape entirely. */
+    dmftp_callbacks_t engine_callbacks;
+    engine_callbacks.on_command = dmftp_handle_command;
+    engine_callbacks.on_send    = dmftp_handle_engine_send;
     c->engine = dmftp_create(&engine_callbacks, c);
     if (c->cwd == NULL || c->engine == NULL)
     {
@@ -384,12 +405,13 @@ static void control_on_accept(dmtcp_conn_t conn, const dmip_addr_t* peer, uint16
     c->control_conn = conn;
     c->binary_mode = true;
 
-    dmtcp_conn_callbacks_t tcp_callbacks = {
-        .on_data   = control_tcp_on_data,
-        .on_closed = control_tcp_on_closed,
-        .on_reset  = control_tcp_on_reset,
-        .on_error  = control_tcp_on_error,
-    };
+    /* Field-by-field - see the compound-literal warning above. */
+    dmtcp_conn_callbacks_t tcp_callbacks;
+    memset(&tcp_callbacks, 0, sizeof(tcp_callbacks));
+    tcp_callbacks.on_data   = control_tcp_on_data;
+    tcp_callbacks.on_closed = control_tcp_on_closed;
+    tcp_callbacks.on_reset  = control_tcp_on_reset;
+    tcp_callbacks.on_error  = control_tcp_on_error;
     dmtcp_conn_set_callbacks(conn, &tcp_callbacks, c);
 
     dmftp_reply(c->engine, 220, "dmftp ready");
