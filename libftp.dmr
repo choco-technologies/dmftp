@@ -1,4 +1,4 @@
-# DMOD Resource File for dmftp
+# DMOD Resource File for libftp
 # This file specifies where resources should be installed
 
 # === Core Module ===
@@ -20,12 +20,6 @@ docs=./docs => ${destination}/${module}/docs [origin=${repo_dir}/docs]
 
 # README file
 readme=./README.md => ${destination}/${module}/README.md [origin=${repo_dir}/README.md]
-
-# === Configuration Files ===
-# ftpd.ini dmsystem unit (type=library) that loads/enables dmftp to start
-# the FTP server, plus dmftp's own port/root/user/pass settings - see
-# docs/service.md
-configs=./configs => ${destination}/${module}/configs [origin=${repo_dir}/configs]
 
 # === Header Files ===
 # Include directory with all headers (public header + generated <module>_defs.h)

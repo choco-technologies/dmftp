@@ -1,32 +1,28 @@
-/* DMOD_ENABLE_REGISTRATION is deliberately NOT set here - only src/dmftp.c
- * (which defines dmftp_create()/_destroy()/_recv()/_reply() via the
- * dmod_dmftp_api_declaration() macro) sets it, so dmftp.h's per-function
- * Dmod_ApiRegistration_t entries are DEFINED exactly once across this
- * module's three translation units. Without it, including dmftp.h here
- * only pulls in `extern` declarations - see dmod_defs.h's
- * _DMOD_API_REGISTRATION macro and dmdhcp_registrations.c's own doc
- * comment in https://github.com/choco-technologies/dmdhcp for the same
- * multi-file-module reasoning. */
 #include "dmod.h"
-#include "dmftp_internal.h"
-#include "dmini.h"
+#include "ftpd_internal.h"
 #include "dmosi.h"
 #include <errno.h>
 #include <string.h>
 
 /**
- * dmftp's dmtcp wiring: the control-connection listener (port 21 by
- * default), the connection table, PASV port bookkeeping/PORT active-open,
- * and config loading. RFC 959 command handling and data transfer live in
- * src/dmftp_commands.c - see dmftp_internal.h.
+ * ftpd's dmtcp wiring: the control-connection listener, the connection
+ * table, and PASV port bookkeeping/PORT active-open. RFC 959 command
+ * handling and data transfer live in src/ftpd_commands.c - see
+ * ftpd_internal.h. Argument parsing and process entry are in src/ftpd.c.
  *
- * dmftp is a Library-type DMOD module (see CMakeLists.txt) with no main():
- * like dmicmp (https://github.com/choco-technologies/dmicmp), it does its
- * whole job from dmod_init()/dmod_deinit() once loaded+enabled, which lets
- * it be started/stopped as a dmsystem "type=library" unit - see
- * configs/ftpd.ini and docs/service.md.
+ * ftpd is an Application-type DMOD module (see CMakeLists.txt) with a
+ * real main() - unlike a Library module (e.g. dmicmp, or this repo's own
+ * libftp), it is spawned as a process by dmsystem's "type=simple" unit
+ * mechanism, with its settings (port/root/user/pass) passed as ordinary
+ * argv via the unit's `args=` key - see configs/ftpd.ini and
+ * docs/service.md. This is deliberate: it is what lets more than one
+ * independently-configured ftpd run at once (a public/anonymous instance
+ * on one port serving one root, a private/authenticated instance on
+ * another port serving a different root), the same way this ecosystem
+ * runs one `networkd`/`dhcpc` process per interface rather than one
+ * global instance juggling all of them.
  *
- * Callback structs (dmftp_callbacks_t, dmtcp_conn_callbacks_t) are always
+ * Callback structs (libftp_callbacks_t, dmtcp_conn_callbacks_t) are always
  * built field-by-field here, never as a `{ .field = fn, ... }` compound
  * literal, even though every other module in this ecosystem (telnetd.c
  * included) uses that shorthand freely. Confirmed on real STM32F746G-DISCO
@@ -40,13 +36,13 @@
  * `x.field = fn;` assignments compile to ordinary PC-relative code that the
  * loader does relocate correctly.
  *
- * PORT (active mode): cmd_port() in dmftp_commands.c refuses any address
+ * PORT (active mode): cmd_port() in ftpd_commands.c refuses any address
  * that doesn't match the control connection's own peer, before ever
  * storing it - without that check, PORT would let any client point this
  * server's outbound data connection at an arbitrary third host/port (the
  * classic "FTP bounce" abuse, RFC 2577 §3.2), effectively turning it into
- * an anonymous port scanner. dmftp_server_connect_port() then opens that
- * connection from DMFTP_ACTIVE_SRC_PORT (20, ftp-data, per RFC 959 §3.2) -
+ * an anonymous port scanner. ftpd_server_connect_port() then opens that
+ * connection from FTPD_ACTIVE_SRC_PORT (20, ftp-data, per RFC 959 §3.2) -
  * the same source port for every active-mode transfer, on every
  * connection, which is fine since dmtcp keys connections by the full
  * 4-tuple, not source port alone.
@@ -60,13 +56,15 @@
  *   - dmtcp_send() on the control connection is best-effort, exactly like
  *     telnetd.c documents for its own Telnet traffic - fine for short
  *     reply lines, which never come close to filling the outbound buffer.
+ *   - No graceful shutdown hook (`dmod_signal()`) - none of this
+ *     ecosystem's other long-running Application modules (networkd,
+ *     dmtcpecho) implement one either; `service stop` simply ends the
+ *     process.
  */
 
-#define DMFTP_CONFIG_PATH "/configs/services/dmftp/ftpd.ini"
+struct ftpd_context* g_ftpd_context = NULL;
 
-struct dmftp_context* g_dmftp_context = NULL;
-
-bool dmftp_is_anonymous_user(const char* user)
+bool ftpd_is_anonymous_user(const char* user)
 {
     static const char anon[] = "anonymous";
     size_t i = 0;
@@ -84,7 +82,7 @@ bool dmftp_is_anonymous_user(const char* user)
 
 /**
  * Strips a configured root's trailing slash (e.g. "/ftp/" -> "/ftp"), so
- * dmftp_commands.c's real-path builder can always just concatenate
+ * ftpd_commands.c's real-path builder can always just concatenate
  * root + virtual_path without worrying about a doubled slash - except for
  * the root "/" itself, which is left alone (dmvfs is mounted there, and
  * stripping it would leave an empty string).
@@ -105,70 +103,9 @@ static char* normalize_root(const char* raw)
     return copy;
 }
 
-/**
- * Loads this server's own settings from the same unit file dmsystem starts
- * it from (DMFTP_CONFIG_PATH) - see docs/service.md for why one ini file
- * serves both readers. Tolerant of the file being absent (falls back to
- * built-in defaults) so dmod_init() still succeeds in a host test
- * environment with no /configs at all.
- *
- * @return 0 on success, -ENOMEM if a setting could not be duplicated
- */
-static int load_config(struct dmftp_context* ctx)
+static ftpd_connection_t* find_free_slot_locked(struct ftpd_context* ctx)
 {
-    const char* port_str_default = "21";
-    (void)port_str_default;
-
-    int port = DMFTP_DEFAULT_PORT;
-    const char* root = "/";
-    const char* user = "anonymous";
-    const char* pass = "";
-
-    dmini_context_t cfg = dmini_create();
-    if (cfg != NULL)
-    {
-        if (dmini_parse_file(cfg, DMFTP_CONFIG_PATH) == DMINI_OK)
-        {
-            port = dmini_get_int(cfg, NULL, "port", DMFTP_DEFAULT_PORT);
-            root = dmini_get_string(cfg, NULL, "root", root);
-            user = dmini_get_string(cfg, NULL, "user", user);
-            pass = dmini_get_string(cfg, NULL, "pass", pass);
-        }
-
-        ctx->control_port = (uint16_t)port;
-        ctx->root = normalize_root(root);
-        ctx->user = Dmod_StrDup(user);
-        ctx->pass = Dmod_StrDup(pass);
-
-        dmini_destroy(cfg);
-    }
-    else
-    {
-        ctx->control_port = (uint16_t)port;
-        ctx->root = normalize_root(root);
-        ctx->user = Dmod_StrDup(user);
-        ctx->pass = Dmod_StrDup(pass);
-    }
-
-    if (ctx->root == NULL || ctx->user == NULL || ctx->pass == NULL)
-        return -ENOMEM;
-
-    return 0;
-}
-
-static void free_config(struct dmftp_context* ctx)
-{
-    Dmod_Free(ctx->root);
-    Dmod_Free(ctx->user);
-    Dmod_Free(ctx->pass);
-    ctx->root = NULL;
-    ctx->user = NULL;
-    ctx->pass = NULL;
-}
-
-static dmftp_connection_t* find_free_slot_locked(struct dmftp_context* ctx)
-{
-    for (size_t i = 0; i < DMFTP_MAX_CONNECTIONS; i++)
+    for (size_t i = 0; i < FTPD_MAX_CONNECTIONS; i++)
     {
         if (!ctx->connections[i].in_use)
             return &ctx->connections[i];
@@ -176,9 +113,9 @@ static dmftp_connection_t* find_free_slot_locked(struct dmftp_context* ctx)
     return NULL;
 }
 
-static dmftp_connection_t* find_connection_by_pasv_port_locked(struct dmftp_context* ctx, uint16_t port)
+static ftpd_connection_t* find_connection_by_pasv_port_locked(struct ftpd_context* ctx, uint16_t port)
 {
-    for (size_t i = 0; i < DMFTP_MAX_CONNECTIONS; i++)
+    for (size_t i = 0; i < FTPD_MAX_CONNECTIONS; i++)
     {
         if (ctx->connections[i].in_use && ctx->connections[i].pasv_pending && ctx->connections[i].pasv_port == port)
             return &ctx->connections[i];
@@ -186,12 +123,12 @@ static dmftp_connection_t* find_connection_by_pasv_port_locked(struct dmftp_cont
     return NULL;
 }
 
-void dmftp_connection_release(dmftp_connection_t* c)
+void ftpd_connection_release(ftpd_connection_t* c)
 {
     if (c == NULL || !c->in_use)
         return;
 
-    dmftp_server_stop_pasv(c);
+    ftpd_server_stop_pasv(c);
 
     if (c->data_conn != NULL)
     {
@@ -207,11 +144,11 @@ void dmftp_connection_release(dmftp_connection_t* c)
     c->list_buffer = NULL;
     c->list_len = 0;
     c->list_sent = 0;
-    c->data_op = dmftp_data_op_none;
+    c->data_op = ftpd_data_op_none;
 
     if (c->engine != NULL)
     {
-        dmftp_destroy(c->engine);
+        libftp_destroy(c->engine);
         c->engine = NULL;
     }
     Dmod_Free(c->username);
@@ -223,7 +160,7 @@ void dmftp_connection_release(dmftp_connection_t* c)
     c->in_use = false;
 }
 
-/* ---- PASV port reservation / PORT active connect - see dmftp_internal.h ---- */
+/* ---- PASV port reservation / PORT active connect - see ftpd_internal.h ---- */
 
 /**
  * Fills in the callbacks shared by both a PASV-accepted and a PORT-
@@ -231,16 +168,16 @@ void dmftp_connection_release(dmftp_connection_t* c)
  * the warning in this file's top comment. `on_established` is left NULL
  * (PASV-accepted connections are already established by the time they're
  * handed to us - see dmtcp_accept_handler_t's own doc comment); callers
- * that need it (dmftp_server_connect_port()) set it themselves afterward.
+ * that need it (ftpd_server_connect_port()) set it themselves afterward.
  */
 static void fill_data_callbacks(dmtcp_conn_callbacks_t* callbacks)
 {
     memset(callbacks, 0, sizeof(*callbacks));
-    callbacks->on_data     = dmftp_data_on_data;
-    callbacks->on_writable = dmftp_data_on_writable;
-    callbacks->on_closed   = dmftp_data_on_closed;
-    callbacks->on_reset    = dmftp_data_on_reset;
-    callbacks->on_error    = dmftp_data_on_error;
+    callbacks->on_data     = ftpd_data_on_data;
+    callbacks->on_writable = ftpd_data_on_writable;
+    callbacks->on_closed   = ftpd_data_on_closed;
+    callbacks->on_reset    = ftpd_data_on_reset;
+    callbacks->on_error    = ftpd_data_on_error;
 }
 
 static void pasv_on_accept(dmtcp_conn_t conn, const dmip_addr_t* peer, uint16_t peer_port, dmnetif_iface_t iface)
@@ -249,7 +186,7 @@ static void pasv_on_accept(dmtcp_conn_t conn, const dmip_addr_t* peer, uint16_t 
     (void)peer_port;
     (void)iface;
 
-    struct dmftp_context* ctx = g_dmftp_context;
+    struct ftpd_context* ctx = g_ftpd_context;
     if (ctx == NULL)
     {
         dmtcp_abort(conn);
@@ -265,7 +202,7 @@ static void pasv_on_accept(dmtcp_conn_t conn, const dmip_addr_t* peer, uint16_t 
     }
 
     dmosi_mutex_lock(ctx->mutex);
-    dmftp_connection_t* c = find_connection_by_pasv_port_locked(ctx, local_port);
+    ftpd_connection_t* c = find_connection_by_pasv_port_locked(ctx, local_port);
     dmosi_mutex_unlock(ctx->mutex);
 
     if (c == NULL)
@@ -277,7 +214,7 @@ static void pasv_on_accept(dmtcp_conn_t conn, const dmip_addr_t* peer, uint16_t 
         return;
     }
 
-    dmftp_server_stop_pasv(c); /* One-shot - the ephemeral port is spent now that it's used. */
+    ftpd_server_stop_pasv(c); /* One-shot - the ephemeral port is spent now that it's used. */
 
     c->data_conn = conn;
     c->transfer_ok = false;
@@ -286,20 +223,20 @@ static void pasv_on_accept(dmtcp_conn_t conn, const dmip_addr_t* peer, uint16_t 
     fill_data_callbacks(&callbacks);
     dmtcp_conn_set_callbacks(conn, &callbacks, c);
 
-    dmftp_data_begin(c);
+    ftpd_data_begin(c);
 }
 
-int dmftp_server_connect_port(dmftp_connection_t* c)
+int ftpd_server_connect_port(ftpd_connection_t* c)
 {
     if (c == NULL || !c->port_pending)
         return -EINVAL;
 
     dmtcp_conn_callbacks_t callbacks;
     fill_data_callbacks(&callbacks);
-    callbacks.on_established = dmftp_data_on_established;
+    callbacks.on_established = ftpd_data_on_established;
 
     dmtcp_conn_t conn;
-    int ret = dmtcp_connect(&c->port_addr, c->port_port, (uint16_t)DMFTP_ACTIVE_SRC_PORT, &callbacks, c, &conn);
+    int ret = dmtcp_connect(&c->port_addr, c->port_port, (uint16_t)FTPD_ACTIVE_SRC_PORT, &callbacks, c, &conn);
     if (ret != 0)
         return ret;
 
@@ -309,48 +246,48 @@ int dmftp_server_connect_port(dmftp_connection_t* c)
     return 0;
 }
 
-int dmftp_server_start_pasv(dmftp_connection_t* c, uint16_t* out_port)
+int ftpd_server_start_pasv(ftpd_connection_t* c, uint16_t* out_port)
 {
-    if (c == NULL || out_port == NULL || g_dmftp_context == NULL)
+    if (c == NULL || out_port == NULL || g_ftpd_context == NULL)
         return -EINVAL;
 
-    dmftp_server_stop_pasv(c);
+    ftpd_server_stop_pasv(c);
 
     uint16_t port;
     int ret = dmtcp_listen_any(pasv_on_accept, &port);
     if (ret != 0)
         return ret;
 
-    dmosi_mutex_lock(g_dmftp_context->mutex);
+    dmosi_mutex_lock(g_ftpd_context->mutex);
     c->pasv_pending = true;
     c->pasv_port = port;
-    dmosi_mutex_unlock(g_dmftp_context->mutex);
+    dmosi_mutex_unlock(g_ftpd_context->mutex);
 
     *out_port = port;
     return 0;
 }
 
-void dmftp_server_stop_pasv(dmftp_connection_t* c)
+void ftpd_server_stop_pasv(ftpd_connection_t* c)
 {
     if (c == NULL || !c->pasv_pending)
         return;
 
     dmtcp_unlisten(c->pasv_port);
 
-    if (g_dmftp_context != NULL)
-        dmosi_mutex_lock(g_dmftp_context->mutex);
+    if (g_ftpd_context != NULL)
+        dmosi_mutex_lock(g_ftpd_context->mutex);
     c->pasv_pending = false;
     c->pasv_port = 0;
-    if (g_dmftp_context != NULL)
-        dmosi_mutex_unlock(g_dmftp_context->mutex);
+    if (g_ftpd_context != NULL)
+        dmosi_mutex_unlock(g_ftpd_context->mutex);
 }
 
 /* ---- Control connection ---- */
 
-void dmftp_handle_engine_send(dmftp_t engine, const uint8_t* data, size_t data_len, void* user_data)
+void ftpd_handle_engine_send(libftp_t engine, const uint8_t* data, size_t data_len, void* user_data)
 {
     (void)engine;
-    dmftp_connection_t* c = user_data;
+    ftpd_connection_t* c = user_data;
     if (c->control_conn != NULL)
     {
         /* Best-effort - see this file's top comment. */
@@ -360,7 +297,7 @@ void dmftp_handle_engine_send(dmftp_t engine, const uint8_t* data, size_t data_l
 
 static void control_tcp_on_data(dmtcp_conn_t conn, const uint8_t* data, size_t data_len, void* user_data)
 {
-    dmftp_connection_t* c = user_data;
+    ftpd_connection_t* c = user_data;
     if (data == NULL)
     {
         /* Peer's FIN (dmtcp_data_handler_t's read()-returns-0 convention) -
@@ -369,28 +306,28 @@ static void control_tcp_on_data(dmtcp_conn_t conn, const uint8_t* data, size_t d
         dmtcp_close(conn);
         return;
     }
-    dmftp_recv(c->engine, data, data_len);
+    libftp_recv(c->engine, data, data_len);
 }
 
 static void control_tcp_on_closed(dmtcp_conn_t conn, void* user_data)
 {
     (void)conn;
-    DMOD_LOG_INFO("dmftp: <%p> control connection closed\n", user_data);
-    dmftp_connection_release((dmftp_connection_t*)user_data);
+    DMOD_LOG_INFO("ftpd: <%p> control connection closed\n", user_data);
+    ftpd_connection_release((ftpd_connection_t*)user_data);
 }
 
 static void control_tcp_on_reset(dmtcp_conn_t conn, void* user_data)
 {
     (void)conn;
-    DMOD_LOG_INFO("dmftp: <%p> control connection reset\n", user_data);
-    dmftp_connection_release((dmftp_connection_t*)user_data);
+    DMOD_LOG_INFO("ftpd: <%p> control connection reset\n", user_data);
+    ftpd_connection_release((ftpd_connection_t*)user_data);
 }
 
 static void control_tcp_on_error(dmtcp_conn_t conn, int error, void* user_data)
 {
     (void)conn;
-    DMOD_LOG_INFO("dmftp: <%p> control connection error %d\n", user_data, error);
-    dmftp_connection_release((dmftp_connection_t*)user_data);
+    DMOD_LOG_INFO("ftpd: <%p> control connection error %d\n", user_data, error);
+    ftpd_connection_release((ftpd_connection_t*)user_data);
 }
 
 static void control_on_accept(dmtcp_conn_t conn, const dmip_addr_t* peer, uint16_t peer_port, dmnetif_iface_t iface)
@@ -399,12 +336,12 @@ static void control_on_accept(dmtcp_conn_t conn, const dmip_addr_t* peer, uint16
 
     if (peer != NULL && peer->family == dmip_family_v4)
     {
-        DMOD_LOG_INFO("dmftp: accepted control connection from %u.%u.%u.%u:%u\n",
+        DMOD_LOG_INFO("ftpd: accepted control connection from %u.%u.%u.%u:%u\n",
             (unsigned)peer->addr.v4[0], (unsigned)peer->addr.v4[1],
             (unsigned)peer->addr.v4[2], (unsigned)peer->addr.v4[3], (unsigned)peer_port);
     }
 
-    struct dmftp_context* ctx = g_dmftp_context;
+    struct ftpd_context* ctx = g_ftpd_context;
     if (ctx == NULL)
     {
         dmtcp_abort(conn);
@@ -412,7 +349,7 @@ static void control_on_accept(dmtcp_conn_t conn, const dmip_addr_t* peer, uint16
     }
 
     dmosi_mutex_lock(ctx->mutex);
-    dmftp_connection_t* c = find_free_slot_locked(ctx);
+    ftpd_connection_t* c = find_free_slot_locked(ctx);
     if (c != NULL)
     {
         memset(c, 0, sizeof(*c));
@@ -422,7 +359,7 @@ static void control_on_accept(dmtcp_conn_t conn, const dmip_addr_t* peer, uint16
 
     if (c == NULL)
     {
-        DMOD_LOG_WARN("dmftp: too many connections (max %u), rejecting\n", (unsigned)DMFTP_MAX_CONNECTIONS);
+        DMOD_LOG_WARN("ftpd: too many connections (max %u), rejecting\n", (unsigned)FTPD_MAX_CONNECTIONS);
         dmtcp_abort(conn);
         return;
     }
@@ -435,15 +372,15 @@ static void control_on_accept(dmtcp_conn_t conn, const dmip_addr_t* peer, uint16
      * it silently ends up as its unrelocated link-time offset instead of
      * a real runtime address. Individual assignments avoid that codegen
      * shape entirely. */
-    dmftp_callbacks_t engine_callbacks;
-    engine_callbacks.on_command = dmftp_handle_command;
-    engine_callbacks.on_send    = dmftp_handle_engine_send;
-    c->engine = dmftp_create(&engine_callbacks, c);
+    libftp_callbacks_t engine_callbacks;
+    engine_callbacks.on_command = ftpd_handle_command;
+    engine_callbacks.on_send    = ftpd_handle_engine_send;
+    c->engine = libftp_create(&engine_callbacks, c);
     if (c->cwd == NULL || c->engine == NULL)
     {
         Dmod_Free(c->cwd);
         c->cwd = NULL;
-        if (c->engine != NULL) { dmftp_destroy(c->engine); c->engine = NULL; }
+        if (c->engine != NULL) { libftp_destroy(c->engine); c->engine = NULL; }
         c->in_use = false;
         dmtcp_abort(conn);
         return;
@@ -461,67 +398,62 @@ static void control_on_accept(dmtcp_conn_t conn, const dmip_addr_t* peer, uint16
     tcp_callbacks.on_error  = control_tcp_on_error;
     dmtcp_conn_set_callbacks(conn, &tcp_callbacks, c);
 
-    dmftp_reply(c->engine, 220, "dmftp ready");
+    libftp_reply(c->engine, 220, "ftpd ready");
 }
 
-int dmod_init(const Dmod_Config_t *Config)
+/**
+ * Sets up this process's one server instance and starts listening -
+ * called once from main() with the settings it parsed out of argv. Never
+ * torn back down: an Application module has no dmod_deinit() equivalent
+ * to call it from - see this file's top comment.
+ *
+ * @return 0 on success, -ENOMEM on allocation failure, -EADDRINUSE (or
+ *         another negative dmtcp_listen() error) if `port` is already in
+ *         use
+ */
+int ftpd_server_start(uint16_t port, const char* root, const char* user, const char* pass)
 {
-    (void)Config;
-
-    struct dmftp_context* ctx = Dmod_Malloc(sizeof(*ctx));
+    struct ftpd_context* ctx = Dmod_Malloc(sizeof(*ctx));
     if (ctx == NULL)
-        return -1;
+        return -ENOMEM;
     memset(ctx, 0, sizeof(*ctx));
 
-    if (load_config(ctx) != 0)
+    ctx->control_port = port;
+    ctx->root = normalize_root(root);
+    ctx->user = Dmod_StrDup(user);
+    ctx->pass = Dmod_StrDup(pass);
+    if (ctx->root == NULL || ctx->user == NULL || ctx->pass == NULL)
     {
-        DMOD_LOG_ERROR("dmftp: failed to load configuration\n");
-        free_config(ctx);
+        Dmod_Free(ctx->root);
+        Dmod_Free(ctx->user);
+        Dmod_Free(ctx->pass);
         Dmod_Free(ctx);
-        return -1;
+        return -ENOMEM;
     }
 
     ctx->mutex = dmosi_mutex_create(false);
     if (ctx->mutex == NULL)
     {
-        free_config(ctx);
+        Dmod_Free(ctx->root);
+        Dmod_Free(ctx->user);
+        Dmod_Free(ctx->pass);
         Dmod_Free(ctx);
-        return -1;
+        return -ENOMEM;
     }
 
     int ret = dmtcp_listen(ctx->control_port, control_on_accept);
     if (ret != 0)
     {
-        DMOD_LOG_ERROR("dmftp: failed to listen on TCP port %u (error %d)\n", (unsigned)ctx->control_port, ret);
+        DMOD_LOG_ERROR("ftpd: failed to listen on TCP port %u (error %d)\n", (unsigned)ctx->control_port, ret);
         dmosi_mutex_destroy(ctx->mutex);
-        free_config(ctx);
+        Dmod_Free(ctx->root);
+        Dmod_Free(ctx->user);
+        Dmod_Free(ctx->pass);
         Dmod_Free(ctx);
-        return -1;
+        return ret;
     }
 
-    g_dmftp_context = ctx;
-    DMOD_LOG_INFO("dmftp: listening on TCP port %u, root=\"%s\"\n", (unsigned)ctx->control_port, ctx->root);
-    return 0;
-}
-
-int dmod_deinit(void)
-{
-    struct dmftp_context* ctx = g_dmftp_context;
-    if (ctx == NULL)
-        return 0;
-
-    dmtcp_unlisten(ctx->control_port);
-
-    for (size_t i = 0; i < DMFTP_MAX_CONNECTIONS; i++)
-    {
-        if (ctx->connections[i].in_use)
-            dmftp_connection_release(&ctx->connections[i]);
-    }
-
-    dmosi_mutex_destroy(ctx->mutex);
-    g_dmftp_context = NULL;
-
-    free_config(ctx);
-    Dmod_Free(ctx);
+    g_ftpd_context = ctx;
+    DMOD_LOG_INFO("ftpd: listening on TCP port %u, root=\"%s\"\n", (unsigned)ctx->control_port, ctx->root);
     return 0;
 }

@@ -1,24 +1,26 @@
-# dmftp Documentation
+# libftp Documentation
 
-dmftp is an FTP (RFC 959) server for DMOD boards: a transport-agnostic
-control-line engine (`include/dmftp.h`) plus a dmtcp/filesystem-backed
-server built on top of it, started automatically at boot as a dmsystem
-service.
+libftp is the transport-agnostic FTP (RFC 959) control-line engine
+(`include/libftp.h`) at the heart of this repository's real FTP server,
+[ftpd](../tools/ftpd) - see that module's own docs for the server itself
+(command handling, PASV/PORT data transfer, running it as a dmsystem
+service).
 
 ## Contents
 
-- **[api-reference.md](api-reference.md)** - Complete API documentation
-- **[service.md](service.md)** - Running dmftp as a dmsystem service
+- **[api-reference.md](api-reference.md)** - Complete API documentation for this engine
+- **[../tools/ftpd/docs/service.md](../tools/ftpd/docs/service.md)** - Running ftpd as a dmsystem service
+- **[../tools/ftpd/README.md](../tools/ftpd/README.md)** - ftpd's own README (supported commands, configuration, known limitations)
 
 ## Quick Reference
 
 ```c
-#include "dmftp.h"
+#include "libftp.h"
 ```
 
 View documentation using `dmf-man`:
 
 ```bash
-dmf-man dmftp          # Main documentation
-dmf-man dmftp api      # API reference
+dmf-man libftp          # Main documentation
+dmf-man libftp api      # API reference
 ```

@@ -1,21 +1,21 @@
 #define DMOD_ENABLE_REGISTRATION ON
 #include "dmod.h"
-#include "dmftp.h"
+#include "libftp.h"
 #include <errno.h>
 
 /**
- * dmftp's transport-agnostic control-connection engine - see the header's
- * top comment. dmod_init()/dmod_deinit() (the actual dmtcp/filesystem-
- * backed FTP *server*) live in src/dmftp_server.c, not here.
+ * libftp's transport-agnostic control-connection engine - see the header's
+ * top comment. The actual dmtcp/filesystem-backed FTP *server* is a
+ * separate Application module, tools/ftpd, not this Library.
  */
-struct dmftp
+struct libftp
 {
-    dmftp_callbacks_t callbacks;
+    libftp_callbacks_t callbacks;
     void* user_data;
 
-    char   line[DMFTP_MAX_LINE_LEN];
+    char   line[LIBFTP_MAX_LINE_LEN];
     size_t line_len;
-    bool   line_overflowed; /**< See dmftp_recv()'s doc comment on truncation */
+    bool   line_overflowed; /**< See libftp_recv()'s doc comment on truncation */
 };
 
 static char to_upper_ascii(char c)
@@ -26,11 +26,11 @@ static char to_upper_ascii(char c)
 /**
  * Splits `session->line` (NUL-terminated by the caller) into an upper-cased
  * verb and a left-trimmed argument, then invokes on_command. Never called
- * with an empty line (dmftp_recv() skips those - a bare CRLF is simply
+ * with an empty line (libftp_recv() skips those - a bare CRLF is simply
  * ignored, matching real FTP clients/servers keeping the connection alive
  * with blank lines).
  */
-static void dispatch_line(dmftp_t session)
+static void dispatch_line(libftp_t session)
 {
     char* line = session->line;
 
@@ -59,14 +59,14 @@ static void dispatch_line(dmftp_t session)
     }
 }
 
-dmod_dmftp_api_declaration(1.0, dmftp_t, _create, ( const dmftp_callbacks_t* callbacks, void* user_data ))
+dmod_libftp_api_declaration(1.0, libftp_t, _create, ( const libftp_callbacks_t* callbacks, void* user_data ))
 {
     if (callbacks == NULL || callbacks->on_send == NULL)
     {
         return NULL;
     }
 
-    struct dmftp* session = Dmod_Malloc(sizeof(*session));
+    struct libftp* session = Dmod_Malloc(sizeof(*session));
     if (session == NULL)
     {
         return NULL;
@@ -80,12 +80,12 @@ dmod_dmftp_api_declaration(1.0, dmftp_t, _create, ( const dmftp_callbacks_t* cal
     return session;
 }
 
-dmod_dmftp_api_declaration(1.0, void, _destroy, ( dmftp_t session ))
+dmod_libftp_api_declaration(1.0, void, _destroy, ( libftp_t session ))
 {
     Dmod_Free(session);
 }
 
-dmod_dmftp_api_declaration(1.0, int, _recv, ( dmftp_t session, const uint8_t* data, size_t data_len ))
+dmod_libftp_api_declaration(1.0, int, _recv, ( libftp_t session, const uint8_t* data, size_t data_len ))
 {
     if (session == NULL || (data == NULL && data_len > 0))
     {
@@ -116,13 +116,13 @@ dmod_dmftp_api_declaration(1.0, int, _recv, ( dmftp_t session, const uint8_t* da
             continue;
         }
 
-        if (session->line_len < DMFTP_MAX_LINE_LEN - 1)
+        if (session->line_len < LIBFTP_MAX_LINE_LEN - 1)
         {
             session->line[session->line_len++] = byte;
         }
         else
         {
-            /* Line longer than DMFTP_MAX_LINE_LEN - see the header's doc
+            /* Line longer than LIBFTP_MAX_LINE_LEN - see the header's doc
              * comment: the overflow is dropped, not merged into the next
              * line, by discarding everything buffered for this line once
              * its terminator finally arrives. */
@@ -133,14 +133,14 @@ dmod_dmftp_api_declaration(1.0, int, _recv, ( dmftp_t session, const uint8_t* da
     return 0;
 }
 
-dmod_dmftp_api_declaration(1.0, int, _reply, ( dmftp_t session, int code, const char* text ))
+dmod_libftp_api_declaration(1.0, int, _reply, ( libftp_t session, int code, const char* text ))
 {
     if (session == NULL || text == NULL || code < 100 || code > 559)
     {
         return -EINVAL;
     }
 
-    char buffer[DMFTP_MAX_LINE_LEN];
+    char buffer[LIBFTP_MAX_LINE_LEN];
     int len = Dmod_SnPrintf(buffer, sizeof(buffer), "%d %s\r\n", code, text);
     if (len < 0)
     {
@@ -152,5 +152,16 @@ dmod_dmftp_api_declaration(1.0, int, _reply, ( dmftp_t session, int code, const 
     }
 
     session->callbacks.on_send(session, (const uint8_t*)buffer, (size_t)len, session->user_data);
+    return 0;
+}
+
+int dmod_init(const Dmod_Config_t *Config)
+{
+    (void)Config;
+    return 0;
+}
+
+int dmod_deinit(void)
+{
     return 0;
 }

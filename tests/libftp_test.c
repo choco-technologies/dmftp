@@ -1,6 +1,6 @@
 #define DMOD_ENABLE_REGISTRATION ON
 #include "dmod_test.h"
-#include "dmftp.h"
+#include "libftp.h"
 #include <string.h>
 
 /* dmod modules have no libc memcpy()/memcmp() (see dmod/src/module/string.c's
@@ -23,7 +23,7 @@ static bool str_equal(const char* a, const char* b)
     return a[i] == b[i];
 }
 
-static dmftp_t g_session = NULL;
+static libftp_t g_session = NULL;
 
 /* on_command capture */
 #define CAPTURE_MAX 256
@@ -43,7 +43,7 @@ static void reset_captures(void)
     g_send_len = 0;
 }
 
-static void on_command(dmftp_t session, const char* verb, const char* arg, void* user_data)
+static void on_command(libftp_t session, const char* verb, const char* arg, void* user_data)
 {
     (void)session;
     (void)user_data;
@@ -52,7 +52,7 @@ static void on_command(dmftp_t session, const char* verb, const char* arg, void*
     g_command_calls++;
 }
 
-static void on_send(dmftp_t session, const uint8_t* data, size_t data_len, void* user_data)
+static void on_send(libftp_t session, const uint8_t* data, size_t data_len, void* user_data)
 {
     (void)session;
     (void)user_data;
@@ -67,32 +67,32 @@ void dmod_test_setup(void)
 {
     reset_captures();
 
-    dmftp_callbacks_t callbacks = {
+    libftp_callbacks_t callbacks = {
         .on_command = on_command,
         .on_send    = on_send,
     };
-    g_session = dmftp_create(&callbacks, NULL);
+    g_session = libftp_create(&callbacks, NULL);
 }
 
 void dmod_test_teardown(void)
 {
-    dmftp_destroy(g_session);
+    libftp_destroy(g_session);
     g_session = NULL;
 }
 
-DMOD_TEST_STEP(dmftp_create_requires_on_send)
+DMOD_TEST_STEP(libftp_create_requires_on_send)
 {
     DMOD_TEST_EXPECT_NOT_NULL(g_session);
 
-    dmftp_callbacks_t no_send = { 0 };
-    DMOD_TEST_EXPECT_NULL(dmftp_create(&no_send, NULL));
-    DMOD_TEST_EXPECT_NULL(dmftp_create(NULL, NULL));
+    libftp_callbacks_t no_send = { 0 };
+    DMOD_TEST_EXPECT_NULL(libftp_create(&no_send, NULL));
+    DMOD_TEST_EXPECT_NULL(libftp_create(NULL, NULL));
 }
 
-DMOD_TEST_STEP(dmftp_recv_splits_verb_and_arg)
+DMOD_TEST_STEP(libftp_recv_splits_verb_and_arg)
 {
     const uint8_t input[] = "USER anonymous\r\n";
-    int ret = dmftp_recv(g_session, input, sizeof(input) - 1);
+    int ret = libftp_recv(g_session, input, sizeof(input) - 1);
 
     DMOD_TEST_EXPECT_EQ(ret, 0);
     DMOD_TEST_EXPECT_EQ(g_command_calls, 1);
@@ -100,55 +100,55 @@ DMOD_TEST_STEP(dmftp_recv_splits_verb_and_arg)
     DMOD_TEST_EXPECT_TRUE(str_equal(g_arg, "anonymous"));
 }
 
-DMOD_TEST_STEP(dmftp_recv_upper_cases_the_verb)
+DMOD_TEST_STEP(libftp_recv_upper_cases_the_verb)
 {
     const uint8_t input[] = "user bob\r\n";
-    dmftp_recv(g_session, input, sizeof(input) - 1);
+    libftp_recv(g_session, input, sizeof(input) - 1);
 
     DMOD_TEST_EXPECT_TRUE(str_equal(g_verb, "USER"));
     DMOD_TEST_EXPECT_TRUE(str_equal(g_arg, "bob"));
 }
 
-DMOD_TEST_STEP(dmftp_recv_command_with_no_argument)
+DMOD_TEST_STEP(libftp_recv_command_with_no_argument)
 {
     const uint8_t input[] = "NOOP\r\n";
-    dmftp_recv(g_session, input, sizeof(input) - 1);
+    libftp_recv(g_session, input, sizeof(input) - 1);
 
     DMOD_TEST_EXPECT_TRUE(str_equal(g_verb, "NOOP"));
     DMOD_TEST_EXPECT_TRUE(str_equal(g_arg, ""));
 }
 
-DMOD_TEST_STEP(dmftp_recv_tolerates_bare_lf)
+DMOD_TEST_STEP(libftp_recv_tolerates_bare_lf)
 {
     /* Real clients always send CRLF, but a bare LF (no preceding CR)
-     * should still terminate the line - see dmftp_recv()'s doc comment. */
+     * should still terminate the line - see libftp_recv()'s doc comment. */
     const uint8_t input[] = "PWD\n";
-    dmftp_recv(g_session, input, sizeof(input) - 1);
+    libftp_recv(g_session, input, sizeof(input) - 1);
 
     DMOD_TEST_EXPECT_EQ(g_command_calls, 1);
     DMOD_TEST_EXPECT_TRUE(str_equal(g_verb, "PWD"));
 }
 
-DMOD_TEST_STEP(dmftp_recv_across_multiple_calls)
+DMOD_TEST_STEP(libftp_recv_across_multiple_calls)
 {
-    /* A command line split across two dmftp_recv() calls (e.g. two TCP
+    /* A command line split across two libftp_recv() calls (e.g. two TCP
      * segments) must still be reported as one command once complete. */
     const uint8_t part1[] = "CWD /so";
     const uint8_t part2[] = "me/dir\r\n";
 
-    dmftp_recv(g_session, part1, sizeof(part1) - 1);
+    libftp_recv(g_session, part1, sizeof(part1) - 1);
     DMOD_TEST_EXPECT_EQ(g_command_calls, 0);
 
-    dmftp_recv(g_session, part2, sizeof(part2) - 1);
+    libftp_recv(g_session, part2, sizeof(part2) - 1);
     DMOD_TEST_EXPECT_EQ(g_command_calls, 1);
     DMOD_TEST_EXPECT_TRUE(str_equal(g_verb, "CWD"));
     DMOD_TEST_EXPECT_TRUE(str_equal(g_arg, "/some/dir"));
 }
 
-DMOD_TEST_STEP(dmftp_recv_multiple_lines_in_one_call)
+DMOD_TEST_STEP(libftp_recv_multiple_lines_in_one_call)
 {
     const uint8_t input[] = "TYPE I\r\nPWD\r\n";
-    dmftp_recv(g_session, input, sizeof(input) - 1);
+    libftp_recv(g_session, input, sizeof(input) - 1);
 
     /* Only the *last* command's verb/arg remain captured, but both must
      * have fired. */
@@ -156,43 +156,43 @@ DMOD_TEST_STEP(dmftp_recv_multiple_lines_in_one_call)
     DMOD_TEST_EXPECT_TRUE(str_equal(g_verb, "PWD"));
 }
 
-DMOD_TEST_STEP(dmftp_recv_ignores_blank_lines)
+DMOD_TEST_STEP(libftp_recv_ignores_blank_lines)
 {
     const uint8_t input[] = "\r\n\r\nNOOP\r\n";
-    dmftp_recv(g_session, input, sizeof(input) - 1);
+    libftp_recv(g_session, input, sizeof(input) - 1);
 
     DMOD_TEST_EXPECT_EQ(g_command_calls, 1);
 }
 
-DMOD_TEST_STEP(dmftp_recv_rejects_null_data_with_nonzero_len)
+DMOD_TEST_STEP(libftp_recv_rejects_null_data_with_nonzero_len)
 {
-    int ret = dmftp_recv(g_session, NULL, 5);
+    int ret = libftp_recv(g_session, NULL, 5);
     DMOD_TEST_EXPECT_EQ(ret, -22 /* EINVAL */);
 }
 
-DMOD_TEST_STEP(dmftp_reply_formats_code_and_text)
+DMOD_TEST_STEP(libftp_reply_formats_code_and_text)
 {
-    int ret = dmftp_reply(g_session, 230, "Login successful");
+    int ret = libftp_reply(g_session, 230, "Login successful");
 
     DMOD_TEST_EXPECT_EQ(ret, 0);
     g_send_buf[g_send_len] = '\0';
     DMOD_TEST_EXPECT_TRUE(str_equal(g_send_buf, "230 Login successful\r\n"));
 }
 
-DMOD_TEST_STEP(dmftp_reply_rejects_bad_code)
+DMOD_TEST_STEP(libftp_reply_rejects_bad_code)
 {
-    DMOD_TEST_EXPECT_EQ(dmftp_reply(g_session, 99, "x"), -22 /* EINVAL */);
-    DMOD_TEST_EXPECT_EQ(dmftp_reply(g_session, 560, "x"), -22 /* EINVAL */);
+    DMOD_TEST_EXPECT_EQ(libftp_reply(g_session, 99, "x"), -22 /* EINVAL */);
+    DMOD_TEST_EXPECT_EQ(libftp_reply(g_session, 560, "x"), -22 /* EINVAL */);
 }
 
-DMOD_TEST_STEP(dmftp_reply_rejects_null_args)
+DMOD_TEST_STEP(libftp_reply_rejects_null_args)
 {
-    DMOD_TEST_EXPECT_EQ(dmftp_reply(NULL, 200, "x"), -22 /* EINVAL */);
-    DMOD_TEST_EXPECT_EQ(dmftp_reply(g_session, 200, NULL), -22 /* EINVAL */);
+    DMOD_TEST_EXPECT_EQ(libftp_reply(NULL, 200, "x"), -22 /* EINVAL */);
+    DMOD_TEST_EXPECT_EQ(libftp_reply(g_session, 200, NULL), -22 /* EINVAL */);
 }
 
-DMOD_TEST_STEP(dmftp_destroy_null)
+DMOD_TEST_STEP(libftp_destroy_null)
 {
     /* Destroying NULL must not crash. */
-    dmftp_destroy(NULL);
+    libftp_destroy(NULL);
 }
