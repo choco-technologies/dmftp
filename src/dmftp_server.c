@@ -375,27 +375,34 @@ static void control_tcp_on_data(dmtcp_conn_t conn, const uint8_t* data, size_t d
 static void control_tcp_on_closed(dmtcp_conn_t conn, void* user_data)
 {
     (void)conn;
+    DMOD_LOG_INFO("dmftp: <%p> control connection closed\n", user_data);
     dmftp_connection_release((dmftp_connection_t*)user_data);
 }
 
 static void control_tcp_on_reset(dmtcp_conn_t conn, void* user_data)
 {
     (void)conn;
+    DMOD_LOG_INFO("dmftp: <%p> control connection reset\n", user_data);
     dmftp_connection_release((dmftp_connection_t*)user_data);
 }
 
 static void control_tcp_on_error(dmtcp_conn_t conn, int error, void* user_data)
 {
     (void)conn;
-    (void)error;
+    DMOD_LOG_INFO("dmftp: <%p> control connection error %d\n", user_data, error);
     dmftp_connection_release((dmftp_connection_t*)user_data);
 }
 
 static void control_on_accept(dmtcp_conn_t conn, const dmip_addr_t* peer, uint16_t peer_port, dmnetif_iface_t iface)
 {
-    (void)peer;
-    (void)peer_port;
     (void)iface;
+
+    if (peer != NULL && peer->family == dmip_family_v4)
+    {
+        DMOD_LOG_INFO("dmftp: accepted control connection from %u.%u.%u.%u:%u\n",
+            (unsigned)peer->addr.v4[0], (unsigned)peer->addr.v4[1],
+            (unsigned)peer->addr.v4[2], (unsigned)peer->addr.v4[3], (unsigned)peer_port);
+    }
 
     struct dmftp_context* ctx = g_dmftp_context;
     if (ctx == NULL)

@@ -283,7 +283,11 @@ static bool render_listing(const char* real_dir, bool name_only, uint8_t** out_b
  *                      Data connection sending
  * ========================================================================== */
 
-static void finish_transfer(dmftp_connection_t* c, int code, const char* text)
+/** Releases everything a LIST/NLST/RETR/STOR (or a stray idle data
+ * connection) held, without sending any reply - callers decide whether a
+ * reply is owed (see dmftp_data_on_closed()/_reset()/_error() vs.
+ * finish_transfer() below). */
+static void cleanup_transfer_state(dmftp_connection_t* c)
 {
     if (c->transfer_file != NULL)
     {
@@ -297,7 +301,15 @@ static void finish_transfer(dmftp_connection_t* c, int code, const char* text)
     c->data_op = dmftp_data_op_none;
     c->data_conn = NULL;
     c->transfer_ok = false;
+}
 
+/** Cleans up and always replies - used where a reply is unconditionally
+ * owed (cmd_abor()). See dmftp_data_on_closed()/_reset()/_error() for the
+ * data-connection-ended paths, which reply only if a transfer was
+ * actually in progress. */
+static void finish_transfer(dmftp_connection_t* c, int code, const char* text)
+{
+    cleanup_transfer_state(c);
     reply(c, code, text);
 }
 
@@ -397,8 +409,17 @@ void dmftp_data_on_data(dmtcp_conn_t conn, const uint8_t* data, size_t data_len,
 
     if (data == NULL)
     {
-        /* Peer's FIN - the upload finished cleanly. */
-        c->transfer_ok = true;
+        /* Peer's FIN. For STOR (the client is the sender), this is the
+         * normal, successful end of the upload. For LIST/NLST/RETR (the
+         * client is only ever the receiver) or an idle connection nothing
+         * ever claimed (data_op still none - e.g. LIST failed before
+         * reaching the data phase, and the client dropped the now-useless
+         * PASV/PORT connection), a FIN from the client is not a success
+         * signal - transfer_ok stays false, and dmftp_data_on_closed()
+         * only replies at all if data_op says a transfer was actually
+         * requested. */
+        if (c->data_op == dmftp_data_op_stor)
+            c->transfer_ok = true;
         dmtcp_close(conn);
         return;
     }
@@ -422,6 +443,24 @@ void dmftp_data_on_writable(dmtcp_conn_t conn, size_t space, void* user_data)
         send_retr_chunk(c);
 }
 
+/**
+ * Common tail for the three data-connection-ended callbacks below: cleans
+ * up always, but only replies if a LIST/NLST/RETR/STOR was actually in
+ * progress (data_op != none). A connection that arrived (PASV) or was
+ * opened (PORT) but never got claimed by a command - e.g. the command
+ * that would have claimed it failed for its own reason and already sent
+ * its own reply, same as any other client-visible error - ending is not
+ * newsworthy and must not produce a second, spurious reply on the control
+ * connection.
+ */
+static void end_data_connection(dmftp_connection_t* c, int code, const char* text)
+{
+    bool was_active = (c->data_op != dmftp_data_op_none);
+    cleanup_transfer_state(c);
+    if (was_active)
+        reply(c, code, text);
+}
+
 void dmftp_data_on_closed(dmtcp_conn_t conn, void* user_data)
 {
     dmftp_connection_t* c = user_data;
@@ -429,9 +468,9 @@ void dmftp_data_on_closed(dmtcp_conn_t conn, void* user_data)
         return;
 
     if (c->transfer_ok)
-        finish_transfer(c, 226, "Transfer complete");
+        end_data_connection(c, 226, "Transfer complete");
     else
-        finish_transfer(c, 426, "Connection closed; transfer aborted");
+        end_data_connection(c, 426, "Connection closed; transfer aborted");
 }
 
 void dmftp_data_on_reset(dmtcp_conn_t conn, void* user_data)
@@ -440,7 +479,7 @@ void dmftp_data_on_reset(dmtcp_conn_t conn, void* user_data)
     if (c->data_conn != conn)
         return;
 
-    finish_transfer(c, 426, "Connection reset; transfer aborted");
+    end_data_connection(c, 426, "Connection reset; transfer aborted");
 }
 
 void dmftp_data_on_error(dmtcp_conn_t conn, int error, void* user_data)
@@ -450,7 +489,7 @@ void dmftp_data_on_error(dmtcp_conn_t conn, int error, void* user_data)
     if (c->data_conn != conn)
         return;
 
-    finish_transfer(c, 451, "Local error; transfer aborted");
+    end_data_connection(c, 451, "Local error; transfer aborted");
 }
 
 void dmftp_data_on_established(dmtcp_conn_t conn, void* user_data)
@@ -702,6 +741,25 @@ static void cmd_port(dmftp_connection_t* c, const char* arg)
     reply(c, 200, "PORT command successful");
 }
 
+/**
+ * Real FTP clients commonly send LIST/NLST with `ls`-style flags instead
+ * of (or before) a path - observed on the wire from Nautilus/GVFS as
+ * literally "LIST -a". A real path is never a `-`-prefixed token, so any
+ * number of leading `-flag` tokens are skipped; whatever remains (if
+ * anything) is treated as the actual path argument.
+ */
+static const char* strip_list_flags(const char* arg)
+{
+    while (arg[0] == '-')
+    {
+        while (*arg != '\0' && *arg != ' ')
+            arg++;
+        while (*arg == ' ')
+            arg++;
+    }
+    return arg;
+}
+
 static void cmd_list(dmftp_connection_t* c, const char* arg, dmftp_data_op_t op)
 {
     if (c->data_conn == NULL && !c->pasv_pending && !c->port_pending)
@@ -714,6 +772,8 @@ static void cmd_list(dmftp_connection_t* c, const char* arg, dmftp_data_op_t op)
         reply(c, 450, "Another transfer is already in progress");
         return;
     }
+
+    arg = strip_list_flags(arg);
 
     char* virtual_path;
     char* real_path;
@@ -907,6 +967,8 @@ void dmftp_handle_command(dmftp_t engine, const char* verb, const char* arg, voi
 {
     (void)engine;
     dmftp_connection_t* c = user_data;
+
+    DMOD_LOG_INFO("dmftp: <%p> -> %s %s\n", (void*)c, verb, arg);
 
     /* Allowed before login, per RFC 959. */
     if (strcmp(verb, "USER") == 0) { cmd_user(c, arg); return; }
