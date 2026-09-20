@@ -16,8 +16,8 @@
 
 /**
  * dmftp's dmtcp wiring: the control-connection listener (port 21 by
- * default), the connection table, PASV port bookkeeping, and config
- * loading. RFC 959 command handling and data transfer live in
+ * default), the connection table, PASV port bookkeeping/PORT active-open,
+ * and config loading. RFC 959 command handling and data transfer live in
  * src/dmftp_commands.c - see dmftp_internal.h.
  *
  * dmftp is a Library-type DMOD module (see CMakeLists.txt) with no main():
@@ -40,11 +40,19 @@
  * `x.field = fn;` assignments compile to ordinary PC-relative code that the
  * loader does relocate correctly.
  *
+ * PORT (active mode): cmd_port() in dmftp_commands.c refuses any address
+ * that doesn't match the control connection's own peer, before ever
+ * storing it - without that check, PORT would let any client point this
+ * server's outbound data connection at an arbitrary third host/port (the
+ * classic "FTP bounce" abuse, RFC 2577 §3.2), effectively turning it into
+ * an anonymous port scanner. dmftp_server_connect_port() then opens that
+ * connection from DMFTP_ACTIVE_SRC_PORT (20, ftp-data, per RFC 959 §3.2) -
+ * the same source port for every active-mode transfer, on every
+ * connection, which is fine since dmtcp keys connections by the full
+ * 4-tuple, not source port alone.
+ *
  * Known limitations (deliberately out of scope for this first version,
  * same spirit as telnetd.c's own documented limitations):
- *   - Active mode (PORT) is not implemented - only PASV. Most modern
- *     clients default to passive mode anyway; an explicit PORT gets a
- *     plain "502 Command not implemented".
  *   - TYPE A (ASCII) is accepted but never actually translates line
  *     endings - every transfer is effectively binary. Harmless for the
  *     overwhelming majority of clients, which default to TYPE I anyway.
@@ -215,7 +223,25 @@ void dmftp_connection_release(dmftp_connection_t* c)
     c->in_use = false;
 }
 
-/* ---- PASV port reservation - see dmftp_internal.h ---- */
+/* ---- PASV port reservation / PORT active connect - see dmftp_internal.h ---- */
+
+/**
+ * Fills in the callbacks shared by both a PASV-accepted and a PORT-
+ * connected data connection. Field-by-field, not a compound literal - see
+ * the warning in this file's top comment. `on_established` is left NULL
+ * (PASV-accepted connections are already established by the time they're
+ * handed to us - see dmtcp_accept_handler_t's own doc comment); callers
+ * that need it (dmftp_server_connect_port()) set it themselves afterward.
+ */
+static void fill_data_callbacks(dmtcp_conn_callbacks_t* callbacks)
+{
+    memset(callbacks, 0, sizeof(*callbacks));
+    callbacks->on_data     = dmftp_data_on_data;
+    callbacks->on_writable = dmftp_data_on_writable;
+    callbacks->on_closed   = dmftp_data_on_closed;
+    callbacks->on_reset    = dmftp_data_on_reset;
+    callbacks->on_error    = dmftp_data_on_error;
+}
 
 static void pasv_on_accept(dmtcp_conn_t conn, const dmip_addr_t* peer, uint16_t peer_port, dmnetif_iface_t iface)
 {
@@ -256,17 +282,31 @@ static void pasv_on_accept(dmtcp_conn_t conn, const dmip_addr_t* peer, uint16_t 
     c->data_conn = conn;
     c->transfer_ok = false;
 
-    /* Field-by-field - see the compound-literal warning in control_on_accept(). */
     dmtcp_conn_callbacks_t callbacks;
-    memset(&callbacks, 0, sizeof(callbacks));
-    callbacks.on_data     = dmftp_data_on_data;
-    callbacks.on_writable = dmftp_data_on_writable;
-    callbacks.on_closed   = dmftp_data_on_closed;
-    callbacks.on_reset    = dmftp_data_on_reset;
-    callbacks.on_error    = dmftp_data_on_error;
+    fill_data_callbacks(&callbacks);
     dmtcp_conn_set_callbacks(conn, &callbacks, c);
 
     dmftp_data_begin(c);
+}
+
+int dmftp_server_connect_port(dmftp_connection_t* c)
+{
+    if (c == NULL || !c->port_pending)
+        return -EINVAL;
+
+    dmtcp_conn_callbacks_t callbacks;
+    fill_data_callbacks(&callbacks);
+    callbacks.on_established = dmftp_data_on_established;
+
+    dmtcp_conn_t conn;
+    int ret = dmtcp_connect(&c->port_addr, c->port_port, (uint16_t)DMFTP_ACTIVE_SRC_PORT, &callbacks, c, &conn);
+    if (ret != 0)
+        return ret;
+
+    c->port_pending = false;
+    c->data_conn = conn;
+    c->transfer_ok = false;
+    return 0;
 }
 
 int dmftp_server_start_pasv(dmftp_connection_t* c, uint16_t* out_port)

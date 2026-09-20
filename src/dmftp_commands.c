@@ -6,12 +6,12 @@
 #include <stdarg.h>
 
 /**
- * RFC 959 command handling and PASV data transfer for dmftp - the "policy"
- * layer on top of the transport-agnostic engine in dmftp.h/src/dmftp.c and
- * the dmtcp/config wiring in src/dmftp_server.c. See dmftp_internal.h for
- * the shared connection/context structs, and dmftp_server.c's top comment
- * for this server's documented scope (PASV only, binary transfers only,
- * no REST/APPE/rename).
+ * RFC 959 command handling and PASV/PORT data transfer for dmftp - the
+ * "policy" layer on top of the transport-agnostic engine in dmftp.h/
+ * src/dmftp.c and the dmtcp/config wiring in src/dmftp_server.c. See
+ * dmftp_internal.h for the shared connection/context structs, and
+ * dmftp_server.c's top comment for this server's documented scope (binary
+ * transfers only, no REST/APPE/rename).
  */
 
 static void reply(dmftp_connection_t* c, int code, const char* text)
@@ -453,6 +453,60 @@ void dmftp_data_on_error(dmtcp_conn_t conn, int error, void* user_data)
     finish_transfer(c, 451, "Local error; transfer aborted");
 }
 
+void dmftp_data_on_established(dmtcp_conn_t conn, void* user_data)
+{
+    dmftp_connection_t* c = user_data;
+    if (c->data_conn != conn)
+        return;
+
+    /* PORT-mode equivalent of pasv_on_accept()'s dmftp_data_begin() call -
+     * the command that triggered dmftp_server_connect_port() already set
+     * data_op before connecting, so this is the exact same dispatch. */
+    dmftp_data_begin(c);
+}
+
+/**
+ * Arranges (or confirms) the data connection a just-prepared LIST/NLST/
+ * RETR/STOR needs, once `c->data_op` is already set:
+ *   - PASV, already connected (c->data_conn set): kick off sending now.
+ *   - PASV, still waiting for the client to connect: nothing to do here -
+ *     pasv_on_accept() calls dmftp_data_begin() once it arrives.
+ *   - PORT: actively connect now.
+ *
+ * @return true if a connection is in hand or successfully underway, false
+ *         if PORT's dmtcp_connect() failed synchronously (the caller
+ *         should discard what it just prepared and reply with an error)
+ */
+static bool start_data_transfer(dmftp_connection_t* c)
+{
+    if (c->data_conn != NULL)
+    {
+        dmftp_data_begin(c);
+        return true;
+    }
+    if (c->port_pending)
+        return dmftp_server_connect_port(c) == 0;
+
+    return true; /* c->pasv_pending - nothing to do yet. */
+}
+
+/** Undoes whatever a LIST/NLST/RETR/STOR just set up, without touching any
+ * data connection - used when start_data_transfer() fails synchronously,
+ * before any reply has gone out for this command. */
+static void discard_prepared_transfer(dmftp_connection_t* c)
+{
+    if (c->transfer_file != NULL)
+    {
+        Dmod_FileClose(c->transfer_file);
+        c->transfer_file = NULL;
+    }
+    Dmod_Free(c->list_buffer);
+    c->list_buffer = NULL;
+    c->list_len = 0;
+    c->list_sent = 0;
+    c->data_op = dmftp_data_op_none;
+}
+
 /* ============================================================================
  *                      RFC 959 commands
  * ========================================================================== */
@@ -565,16 +619,23 @@ static void cmd_cwd(dmftp_connection_t* c, const char* arg)
     replyf(c, 250, "Directory changed to %s", c->cwd);
 }
 
-static void cmd_pasv(dmftp_connection_t* c)
+/** Drops a previous PASV/PORT's data connection that arrived (or was
+ * opened) but never got claimed by a LIST/RETR/STOR - called before
+ * starting a fresh PASV or PORT so a session can't leak one per re-try. */
+static void clear_stale_data_conn(dmftp_connection_t* c)
 {
     if (c->data_conn != NULL && c->data_op == dmftp_data_op_none)
     {
-        /* A previous PASV's data connection arrived but was never claimed
-         * by a LIST/RETR/STOR - drop it rather than leaking it. */
         dmtcp_conn_t stale = c->data_conn;
         c->data_conn = NULL;
         dmtcp_abort(stale);
     }
+}
+
+static void cmd_pasv(dmftp_connection_t* c)
+{
+    clear_stale_data_conn(c);
+    c->port_pending = false; /* A fresh PASV supersedes any pending PORT. */
 
     uint16_t port;
     if (dmftp_server_start_pasv(c, &port) != 0)
@@ -599,11 +660,53 @@ static void cmd_pasv(dmftp_connection_t* c)
         (unsigned)(port >> 8), (unsigned)(port & 0xFFu));
 }
 
+/**
+ * PORT h1,h2,h3,h4,p1,p2 (RFC 959 §4.1.2) - the client tells us where to
+ * actively connect for its *next* data transfer.
+ *
+ * The given address is required to match the control connection's own
+ * peer exactly - see this file's top comment (dmftp_server.c) for why:
+ * without that check, PORT would let any client point our outbound data
+ * connection at an arbitrary third host, the classic "FTP bounce" abuse.
+ * The actual dmtcp_connect() happens later, from whichever LIST/RETR/STOR
+ * uses this - see start_data_transfer().
+ */
+static void cmd_port(dmftp_connection_t* c, const char* arg)
+{
+    unsigned int h1, h2, h3, h4, p1, p2;
+    int fields = Dmod_Sscanf(arg, "%u,%u,%u,%u,%u,%u", &h1, &h2, &h3, &h4, &p1, &p2);
+    if (fields != 6 || h1 > 255 || h2 > 255 || h3 > 255 || h4 > 255 || p1 > 255 || p2 > 255)
+    {
+        reply(c, 501, "Invalid PORT argument");
+        return;
+    }
+
+    dmip_addr_t peer_addr;
+    uint16_t peer_port;
+    if (dmtcp_conn_get_peer_endpoint(c->control_conn, &peer_addr, &peer_port) != 0 ||
+        peer_addr.family != dmip_family_v4 ||
+        peer_addr.addr.v4[0] != (uint8_t)h1 || peer_addr.addr.v4[1] != (uint8_t)h2 ||
+        peer_addr.addr.v4[2] != (uint8_t)h3 || peer_addr.addr.v4[3] != (uint8_t)h4)
+    {
+        reply(c, 501, "PORT address must match the control connection's peer");
+        return;
+    }
+
+    clear_stale_data_conn(c);
+    dmftp_server_stop_pasv(c); /* A fresh PORT supersedes any pending PASV. */
+
+    c->port_addr = peer_addr;
+    c->port_port = (uint16_t)(p1 * 256u + p2);
+    c->port_pending = true;
+
+    reply(c, 200, "PORT command successful");
+}
+
 static void cmd_list(dmftp_connection_t* c, const char* arg, dmftp_data_op_t op)
 {
-    if (c->data_conn == NULL && !c->pasv_pending)
+    if (c->data_conn == NULL && !c->pasv_pending && !c->port_pending)
     {
-        reply(c, 425, "Use PASV first");
+        reply(c, 425, "Use PASV or PORT first");
         return;
     }
     if (c->data_op != dmftp_data_op_none)
@@ -634,22 +737,21 @@ static void cmd_list(dmftp_connection_t* c, const char* arg, dmftp_data_op_t op)
     c->list_buffer = buffer;
     c->list_len = len;
     c->list_sent = 0;
-    reply(c, 150, "Here comes the directory listing");
 
-    /* The data connection may already be sitting there, idle, from a PASV
-     * accept that arrived before this command did (the common client
-     * ordering - see dmftp_data_begin()'s doc comment). If so, kick off
-     * sending right away instead of waiting for an accept that already
-     * happened. */
-    if (c->data_conn != NULL)
-        dmftp_data_begin(c);
+    if (!start_data_transfer(c))
+    {
+        discard_prepared_transfer(c);
+        reply(c, 425, "Cannot open data connection");
+        return;
+    }
+    reply(c, 150, "Here comes the directory listing");
 }
 
 static void cmd_retr(dmftp_connection_t* c, const char* arg)
 {
-    if (c->data_conn == NULL && !c->pasv_pending)
+    if (c->data_conn == NULL && !c->pasv_pending && !c->port_pending)
     {
-        reply(c, 425, "Use PASV first");
+        reply(c, 425, "Use PASV or PORT first");
         return;
     }
     if (c->data_op != dmftp_data_op_none)
@@ -675,19 +777,21 @@ static void cmd_retr(dmftp_connection_t* c, const char* arg)
 
     c->data_op = dmftp_data_op_retr;
     c->transfer_file = file;
-    reply(c, 150, "Opening binary mode data connection for file transfer");
 
-    /* See cmd_list()'s own comment on the data connection possibly already
-     * being there. */
-    if (c->data_conn != NULL)
-        dmftp_data_begin(c);
+    if (!start_data_transfer(c))
+    {
+        discard_prepared_transfer(c);
+        reply(c, 425, "Cannot open data connection");
+        return;
+    }
+    reply(c, 150, "Opening binary mode data connection for file transfer");
 }
 
 static void cmd_stor(dmftp_connection_t* c, const char* arg)
 {
-    if (c->data_conn == NULL && !c->pasv_pending)
+    if (c->data_conn == NULL && !c->pasv_pending && !c->port_pending)
     {
-        reply(c, 425, "Use PASV first");
+        reply(c, 425, "Use PASV or PORT first");
         return;
     }
     if (c->data_op != dmftp_data_op_none)
@@ -713,6 +817,13 @@ static void cmd_stor(dmftp_connection_t* c, const char* arg)
 
     c->data_op = dmftp_data_op_stor;
     c->transfer_file = file;
+
+    if (!start_data_transfer(c))
+    {
+        discard_prepared_transfer(c);
+        reply(c, 425, "Cannot open data connection");
+        return;
+    }
     reply(c, 150, "Ready to receive file");
 }
 
@@ -815,7 +926,7 @@ void dmftp_handle_command(dmftp_t engine, const char* verb, const char* arg, voi
     if (strcmp(verb, "CDUP") == 0) { cmd_cwd(c, ".."); return; }
     if (strcmp(verb, "TYPE") == 0) { cmd_type(c, arg); return; }
     if (strcmp(verb, "PASV") == 0) { cmd_pasv(c); return; }
-    if (strcmp(verb, "PORT") == 0) { reply(c, 502, "Active mode (PORT) is not implemented - use PASV"); return; }
+    if (strcmp(verb, "PORT") == 0) { cmd_port(c, arg); return; }
     if (strcmp(verb, "LIST") == 0) { cmd_list(c, arg, dmftp_data_op_list); return; }
     if (strcmp(verb, "NLST") == 0) { cmd_list(c, arg, dmftp_data_op_nlst); return; }
     if (strcmp(verb, "RETR") == 0) { cmd_retr(c, arg); return; }

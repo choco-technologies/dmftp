@@ -77,5 +77,5 @@ and `dmf-get`'s `--config-map` docs for how the `service=` tag routes
 
 ## Known limitations
 
-See `src/dmftp_server.c`'s top comment for the full list (PASV-only, no
-ASCII translation, no REST/APPE/rename).
+See `src/dmftp_server.c`'s top comment for the full list (no ASCII
+translation, no REST/APPE/rename).

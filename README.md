@@ -17,8 +17,9 @@ dmftp is two things layered on top of each other, in one module:
 - The actual **FTP server** built on top of it (`src/dmftp_server.c`,
   `src/dmftp_commands.c`): a [dmtcp](https://github.com/choco-technologies/dmtcp)
   control-connection listener, RFC 959 command handling, a configurable
-  virtual filesystem root, and PASV-mode data transfer against the board's
-  own filesystem via the Dmod SAL (`Dmod_FileOpen`/`Dmod_OpenDir`/...).
+  virtual filesystem root, and both PASV- and PORT-mode data transfer
+  against the board's own filesystem via the Dmod SAL (`Dmod_FileOpen`/
+  `Dmod_OpenDir`/...).
 
 dmftp is a **Library**-type DMOD module with no `main()` - like
 [dmicmp](https://github.com/choco-technologies/dmicmp), it does its whole
@@ -30,13 +31,15 @@ be started automatically at boot as a
 ### Supported commands
 
 `USER`, `PASS`, `QUIT`, `NOOP`, `SYST`, `PWD`/`XPWD`, `CWD`, `CDUP`, `TYPE`,
-`PASV`, `LIST`, `NLST`, `RETR`, `STOR`, `DELE`, `MKD`/`XMKD`, `RMD`/`XRMD`,
-`SIZE`, `ABOR`.
+`PASV`, `PORT`, `LIST`, `NLST`, `RETR`, `STOR`, `DELE`, `MKD`/`XMKD`,
+`RMD`/`XRMD`, `SIZE`, `ABOR`.
+
+`PORT` only accepts an address matching the control connection's own peer
+(refused otherwise) - this is what stops the server being abused as an
+"FTP bounce" to reach a third host on the client's behalf (RFC 2577 §3.2).
 
 ### Known limitations (deliberately out of scope for this first version)
 
-- **PASV only** - active mode (`PORT`) replies `502 Command not implemented`.
-  Every mainstream FTP client defaults to passive mode already.
 - **No ASCII translation** - `TYPE A` is accepted but every transfer is
   effectively binary (no CRLF translation). Harmless for the overwhelming
   majority of clients, which default to `TYPE I` anyway.

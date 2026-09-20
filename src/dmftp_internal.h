@@ -21,6 +21,10 @@
 #define DMFTP_DEFAULT_PORT      21u
 #define DMFTP_DATA_CHUNK_SIZE   512u
 
+/** Conventional FTP data-connection source port (RFC 959 §3.2) for an
+ * active-mode (PORT) transfer - see dmftp_server_connect_port(). */
+#define DMFTP_ACTIVE_SRC_PORT   20u
+
 typedef enum
 {
     dmftp_data_op_none,
@@ -47,6 +51,14 @@ typedef struct
      * see dmftp_server_start_pasv()/_stop_pasv(). */
     bool     pasv_pending;
     uint16_t pasv_port;
+
+    /* PORT target for this session's *next* data connection - the address
+     * is validated against the control connection's own peer when PORT is
+     * received (see dmftp_commands.c's cmd_port()), so it is always safe
+     * to actually connect to later. */
+    bool        port_pending;
+    dmip_addr_t port_addr;
+    uint16_t    port_port;
 
     /* At most one data connection/transfer in flight at a time. */
     dmftp_data_op_t data_op;
@@ -83,12 +95,16 @@ void dmftp_handle_command(dmftp_t engine, const char* verb, const char* arg, voi
 /** The dmftp_send_handler_t installed on every session's engine (queues bytes on the control dmtcp_conn_t). */
 void dmftp_handle_engine_send(dmftp_t engine, const uint8_t* data, size_t data_len, void* user_data);
 
-/** dmtcp_conn_callbacks_t for a PASV data connection, once accepted - see src/dmftp_server.c's pasv_on_accept(). */
+/** dmtcp_conn_callbacks_t for a data connection (PASV accept or PORT connect) - see
+ * src/dmftp_server.c's pasv_on_accept()/dmftp_server_connect_port(). */
 void dmftp_data_on_data(dmtcp_conn_t conn, const uint8_t* data, size_t data_len, void* user_data);
 void dmftp_data_on_writable(dmtcp_conn_t conn, size_t space, void* user_data);
 void dmftp_data_on_closed(dmtcp_conn_t conn, void* user_data);
 void dmftp_data_on_reset(dmtcp_conn_t conn, void* user_data);
 void dmftp_data_on_error(dmtcp_conn_t conn, int error, void* user_data);
+
+/** PORT-mode only: fires once dmftp_server_connect_port()'s active open completes. */
+void dmftp_data_on_established(dmtcp_conn_t conn, void* user_data);
 
 /** Called once a data connection is accepted, to kick off LIST/NLST/RETR sending. */
 void dmftp_data_begin(dmftp_connection_t* c);
@@ -113,5 +129,18 @@ int dmftp_server_start_pasv(dmftp_connection_t* c, uint16_t* out_port);
 
 /** Undo dmftp_server_start_pasv() - safe to call when no PASV is pending (a no-op). */
 void dmftp_server_stop_pasv(dmftp_connection_t* c);
+
+/**
+ * Actively open `c`'s PORT-requested data connection (dmtcp_connect() from
+ * DMFTP_ACTIVE_SRC_PORT to c->port_addr:c->port_port) - see cmd_port()'s
+ * doc comment for the peer-address validation that makes this safe to call.
+ * On success, clears c->port_pending and sets c->data_conn; the connection
+ * is not necessarily ESTABLISHED yet (dmftp_data_on_established() reports
+ * that once it happens).
+ *
+ * @return 0 on success, -EINVAL if `c` has no PORT pending, or whatever
+ *         dmtcp_connect() itself returned on failure
+ */
+int dmftp_server_connect_port(dmftp_connection_t* c);
 
 #endif // DMFTP_INTERNAL_H
