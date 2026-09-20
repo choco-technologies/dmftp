@@ -1,32 +1,30 @@
-/* DMOD_ENABLE_REGISTRATION is deliberately NOT set here - see
- * src/dmftp_server.c's top comment for why. */
 #include "dmod.h"
-#include "dmftp_internal.h"
+#include "ftpd_internal.h"
 #include <string.h>
 #include <stdarg.h>
 
 /**
- * RFC 959 command handling and PASV/PORT data transfer for dmftp - the
- * "policy" layer on top of the transport-agnostic engine in dmftp.h/
- * src/dmftp.c and the dmtcp/config wiring in src/dmftp_server.c. See
- * dmftp_internal.h for the shared connection/context structs, and
- * dmftp_server.c's top comment for this server's documented scope (binary
- * transfers only, no REST/APPE/rename).
+ * RFC 959 command handling and PASV/PORT data transfer for ftpd - the
+ * "policy" layer on top of libftp's transport-agnostic engine and the
+ * dmtcp/argv wiring in src/ftpd_server.c/ftpd.c. See ftpd_internal.h for
+ * the shared connection/context structs, and ftpd_server.c's top comment
+ * for this server's documented scope (binary transfers only, no
+ * REST/APPE/rename).
  */
 
-static void reply(dmftp_connection_t* c, int code, const char* text)
+static void reply(ftpd_connection_t* c, int code, const char* text)
 {
-    dmftp_reply(c->engine, code, text);
+    libftp_reply(c->engine, code, text);
 }
 
-static void replyf(dmftp_connection_t* c, int code, const char* fmt, ...)
+static void replyf(ftpd_connection_t* c, int code, const char* fmt, ...)
 {
     char buffer[256];
     va_list args;
     va_start(args, fmt);
     Dmod_VSnPrintf(buffer, sizeof(buffer), fmt, args);
     va_end(args);
-    dmftp_reply(c->engine, code, buffer);
+    libftp_reply(c->engine, code, buffer);
 }
 
 /* ============================================================================
@@ -44,7 +42,7 @@ static void replyf(dmftp_connection_t* c, int code, const char* fmt, ...)
  */
 static char* normalize_virtual_path(const char* cwd, const char* arg)
 {
-    char raw[DMFTP_MAX_LINE_LEN];
+    char raw[LIBFTP_MAX_LINE_LEN];
 
     if (arg[0] == '/')
         Dmod_SnPrintf(raw, sizeof(raw), "%s", arg);
@@ -118,13 +116,13 @@ static char* normalize_virtual_path(const char* cwd, const char* arg)
  * functions - e.g. root "/ftp" + virtual "/sub" -> "/ftp/sub". No-op
  * concatenation when root is
  * "/" itself (dmvfs is already mounted there - see
- * src/dmftp_server.c's normalize_root()).
+ * src/ftpd_server.c's normalize_root()).
  *
  * @return A newly heap-allocated real path, or NULL on allocation failure
  */
 static char* build_real_path(const char* virtual_path)
 {
-    const char* root = g_dmftp_context->root;
+    const char* root = g_ftpd_context->root;
     if (root[0] == '/' && root[1] == '\0')
         return Dmod_StrDup(virtual_path);
 
@@ -147,7 +145,7 @@ static char* build_real_path(const char* virtual_path)
  * Frees nothing on success; on failure, replies 451 and both out params
  * are left NULL.
  */
-static void resolve_paths(dmftp_connection_t* c, const char* arg, char** out_virtual, char** out_real)
+static void resolve_paths(ftpd_connection_t* c, const char* arg, char** out_virtual, char** out_real)
 {
     *out_virtual = NULL;
     *out_real = NULL;
@@ -285,9 +283,9 @@ static bool render_listing(const char* real_dir, bool name_only, uint8_t** out_b
 
 /** Releases everything a LIST/NLST/RETR/STOR (or a stray idle data
  * connection) held, without sending any reply - callers decide whether a
- * reply is owed (see dmftp_data_on_closed()/_reset()/_error() vs.
+ * reply is owed (see ftpd_data_on_closed()/_reset()/_error() vs.
  * finish_transfer() below). */
-static void cleanup_transfer_state(dmftp_connection_t* c)
+static void cleanup_transfer_state(ftpd_connection_t* c)
 {
     if (c->transfer_file != NULL)
     {
@@ -298,22 +296,22 @@ static void cleanup_transfer_state(dmftp_connection_t* c)
     c->list_buffer = NULL;
     c->list_len = 0;
     c->list_sent = 0;
-    c->data_op = dmftp_data_op_none;
+    c->data_op = ftpd_data_op_none;
     c->data_conn = NULL;
     c->transfer_ok = false;
 }
 
 /** Cleans up and always replies - used where a reply is unconditionally
- * owed (cmd_abor()). See dmftp_data_on_closed()/_reset()/_error() for the
+ * owed (cmd_abor()). See ftpd_data_on_closed()/_reset()/_error() for the
  * data-connection-ended paths, which reply only if a transfer was
  * actually in progress. */
-static void finish_transfer(dmftp_connection_t* c, int code, const char* text)
+static void finish_transfer(ftpd_connection_t* c, int code, const char* text)
 {
     cleanup_transfer_state(c);
     reply(c, code, text);
 }
 
-static void send_list_chunk(dmftp_connection_t* c)
+static void send_list_chunk(ftpd_connection_t* c)
 {
     for (;;)
     {
@@ -326,7 +324,7 @@ static void send_list_chunk(dmftp_connection_t* c)
 
         int space = dmtcp_send_space(c->data_conn);
         if (space <= 0)
-            return; /* Wait for dmftp_data_on_writable() */
+            return; /* Wait for ftpd_data_on_writable() */
 
         size_t remaining = c->list_len - c->list_sent;
         size_t want = ((size_t)space < remaining) ? (size_t)space : remaining;
@@ -337,19 +335,19 @@ static void send_list_chunk(dmftp_connection_t* c)
 
         c->list_sent += (size_t)sent;
         if ((size_t)sent < want)
-            return; /* Short write - wait for dmftp_data_on_writable() */
+            return; /* Short write - wait for ftpd_data_on_writable() */
     }
 }
 
-static void send_retr_chunk(dmftp_connection_t* c)
+static void send_retr_chunk(ftpd_connection_t* c)
 {
-    uint8_t chunk[DMFTP_DATA_CHUNK_SIZE];
+    uint8_t chunk[FTPD_DATA_CHUNK_SIZE];
 
     for (;;)
     {
         int space = dmtcp_send_space(c->data_conn);
         if (space <= 0)
-            return; /* Wait for dmftp_data_on_writable() */
+            return; /* Wait for ftpd_data_on_writable() */
 
         size_t want = ((size_t)space < sizeof(chunk)) ? (size_t)space : sizeof(chunk);
         size_t got = Dmod_FileRead(chunk, 1, want, c->transfer_file);
@@ -375,20 +373,20 @@ static void send_retr_chunk(dmftp_connection_t* c)
     }
 }
 
-void dmftp_data_begin(dmftp_connection_t* c)
+void ftpd_data_begin(ftpd_connection_t* c)
 {
     switch (c->data_op)
     {
-    case dmftp_data_op_list:
-    case dmftp_data_op_nlst:
+    case ftpd_data_op_list:
+    case ftpd_data_op_nlst:
         send_list_chunk(c);
         break;
-    case dmftp_data_op_retr:
+    case ftpd_data_op_retr:
         send_retr_chunk(c);
         break;
-    case dmftp_data_op_stor:
-        break; /* Nothing to do yet - wait for dmftp_data_on_data() */
-    case dmftp_data_op_none:
+    case ftpd_data_op_stor:
+        break; /* Nothing to do yet - wait for ftpd_data_on_data() */
+    case ftpd_data_op_none:
     default:
         /* The data connection arrived before the LIST/RETR/STOR that will
          * use it - real clients commonly connect PASV's data channel
@@ -401,9 +399,9 @@ void dmftp_data_begin(dmftp_connection_t* c)
     }
 }
 
-void dmftp_data_on_data(dmtcp_conn_t conn, const uint8_t* data, size_t data_len, void* user_data)
+void ftpd_data_on_data(dmtcp_conn_t conn, const uint8_t* data, size_t data_len, void* user_data)
 {
-    dmftp_connection_t* c = user_data;
+    ftpd_connection_t* c = user_data;
     if (c->data_conn != conn)
         return;
 
@@ -415,31 +413,31 @@ void dmftp_data_on_data(dmtcp_conn_t conn, const uint8_t* data, size_t data_len,
          * ever claimed (data_op still none - e.g. LIST failed before
          * reaching the data phase, and the client dropped the now-useless
          * PASV/PORT connection), a FIN from the client is not a success
-         * signal - transfer_ok stays false, and dmftp_data_on_closed()
+         * signal - transfer_ok stays false, and ftpd_data_on_closed()
          * only replies at all if data_op says a transfer was actually
          * requested. */
-        if (c->data_op == dmftp_data_op_stor)
+        if (c->data_op == ftpd_data_op_stor)
             c->transfer_ok = true;
         dmtcp_close(conn);
         return;
     }
 
-    if (c->data_op == dmftp_data_op_stor && c->transfer_file != NULL)
+    if (c->data_op == ftpd_data_op_stor && c->transfer_file != NULL)
     {
         Dmod_FileWrite(data, 1, data_len, c->transfer_file);
     }
 }
 
-void dmftp_data_on_writable(dmtcp_conn_t conn, size_t space, void* user_data)
+void ftpd_data_on_writable(dmtcp_conn_t conn, size_t space, void* user_data)
 {
     (void)space;
-    dmftp_connection_t* c = user_data;
+    ftpd_connection_t* c = user_data;
     if (c->data_conn != conn)
         return;
 
-    if (c->data_op == dmftp_data_op_list || c->data_op == dmftp_data_op_nlst)
+    if (c->data_op == ftpd_data_op_list || c->data_op == ftpd_data_op_nlst)
         send_list_chunk(c);
-    else if (c->data_op == dmftp_data_op_retr)
+    else if (c->data_op == ftpd_data_op_retr)
         send_retr_chunk(c);
 }
 
@@ -453,17 +451,17 @@ void dmftp_data_on_writable(dmtcp_conn_t conn, size_t space, void* user_data)
  * newsworthy and must not produce a second, spurious reply on the control
  * connection.
  */
-static void end_data_connection(dmftp_connection_t* c, int code, const char* text)
+static void end_data_connection(ftpd_connection_t* c, int code, const char* text)
 {
-    bool was_active = (c->data_op != dmftp_data_op_none);
+    bool was_active = (c->data_op != ftpd_data_op_none);
     cleanup_transfer_state(c);
     if (was_active)
         reply(c, code, text);
 }
 
-void dmftp_data_on_closed(dmtcp_conn_t conn, void* user_data)
+void ftpd_data_on_closed(dmtcp_conn_t conn, void* user_data)
 {
-    dmftp_connection_t* c = user_data;
+    ftpd_connection_t* c = user_data;
     if (c->data_conn != conn)
         return;
 
@@ -473,35 +471,35 @@ void dmftp_data_on_closed(dmtcp_conn_t conn, void* user_data)
         end_data_connection(c, 426, "Connection closed; transfer aborted");
 }
 
-void dmftp_data_on_reset(dmtcp_conn_t conn, void* user_data)
+void ftpd_data_on_reset(dmtcp_conn_t conn, void* user_data)
 {
-    dmftp_connection_t* c = user_data;
+    ftpd_connection_t* c = user_data;
     if (c->data_conn != conn)
         return;
 
     end_data_connection(c, 426, "Connection reset; transfer aborted");
 }
 
-void dmftp_data_on_error(dmtcp_conn_t conn, int error, void* user_data)
+void ftpd_data_on_error(dmtcp_conn_t conn, int error, void* user_data)
 {
     (void)error;
-    dmftp_connection_t* c = user_data;
+    ftpd_connection_t* c = user_data;
     if (c->data_conn != conn)
         return;
 
     end_data_connection(c, 451, "Local error; transfer aborted");
 }
 
-void dmftp_data_on_established(dmtcp_conn_t conn, void* user_data)
+void ftpd_data_on_established(dmtcp_conn_t conn, void* user_data)
 {
-    dmftp_connection_t* c = user_data;
+    ftpd_connection_t* c = user_data;
     if (c->data_conn != conn)
         return;
 
-    /* PORT-mode equivalent of pasv_on_accept()'s dmftp_data_begin() call -
-     * the command that triggered dmftp_server_connect_port() already set
+    /* PORT-mode equivalent of pasv_on_accept()'s ftpd_data_begin() call -
+     * the command that triggered ftpd_server_connect_port() already set
      * data_op before connecting, so this is the exact same dispatch. */
-    dmftp_data_begin(c);
+    ftpd_data_begin(c);
 }
 
 /**
@@ -509,22 +507,22 @@ void dmftp_data_on_established(dmtcp_conn_t conn, void* user_data)
  * RETR/STOR needs, once `c->data_op` is already set:
  *   - PASV, already connected (c->data_conn set): kick off sending now.
  *   - PASV, still waiting for the client to connect: nothing to do here -
- *     pasv_on_accept() calls dmftp_data_begin() once it arrives.
+ *     pasv_on_accept() calls ftpd_data_begin() once it arrives.
  *   - PORT: actively connect now.
  *
  * @return true if a connection is in hand or successfully underway, false
  *         if PORT's dmtcp_connect() failed synchronously (the caller
  *         should discard what it just prepared and reply with an error)
  */
-static bool start_data_transfer(dmftp_connection_t* c)
+static bool start_data_transfer(ftpd_connection_t* c)
 {
     if (c->data_conn != NULL)
     {
-        dmftp_data_begin(c);
+        ftpd_data_begin(c);
         return true;
     }
     if (c->port_pending)
-        return dmftp_server_connect_port(c) == 0;
+        return ftpd_server_connect_port(c) == 0;
 
     return true; /* c->pasv_pending - nothing to do yet. */
 }
@@ -532,7 +530,7 @@ static bool start_data_transfer(dmftp_connection_t* c)
 /** Undoes whatever a LIST/NLST/RETR/STOR just set up, without touching any
  * data connection - used when start_data_transfer() fails synchronously,
  * before any reply has gone out for this command. */
-static void discard_prepared_transfer(dmftp_connection_t* c)
+static void discard_prepared_transfer(ftpd_connection_t* c)
 {
     if (c->transfer_file != NULL)
     {
@@ -543,14 +541,14 @@ static void discard_prepared_transfer(dmftp_connection_t* c)
     c->list_buffer = NULL;
     c->list_len = 0;
     c->list_sent = 0;
-    c->data_op = dmftp_data_op_none;
+    c->data_op = ftpd_data_op_none;
 }
 
 /* ============================================================================
  *                      RFC 959 commands
  * ========================================================================== */
 
-static void cmd_user(dmftp_connection_t* c, const char* arg)
+static void cmd_user(ftpd_connection_t* c, const char* arg)
 {
     if (arg[0] == '\0')
     {
@@ -572,7 +570,7 @@ static void cmd_user(dmftp_connection_t* c, const char* arg)
     replyf(c, 331, "Password required for %s", arg);
 }
 
-static void cmd_pass(dmftp_connection_t* c, const char* arg)
+static void cmd_pass(ftpd_connection_t* c, const char* arg)
 {
     if (!c->user_received)
     {
@@ -580,9 +578,9 @@ static void cmd_pass(dmftp_connection_t* c, const char* arg)
         return;
     }
 
-    const struct dmftp_context* ctx = g_dmftp_context;
+    const struct ftpd_context* ctx = g_ftpd_context;
     bool ok;
-    if (dmftp_is_anonymous_user(ctx->user))
+    if (ftpd_is_anonymous_user(ctx->user))
         ok = true;
     else
         ok = (strcmp(c->username, ctx->user) == 0) && (ctx->pass[0] == '\0' || strcmp(arg, ctx->pass) == 0);
@@ -600,19 +598,19 @@ static void cmd_pass(dmftp_connection_t* c, const char* arg)
     }
 }
 
-static void cmd_quit(dmftp_connection_t* c)
+static void cmd_quit(ftpd_connection_t* c)
 {
     reply(c, 221, "Goodbye");
     if (c->control_conn != NULL)
         dmtcp_close(c->control_conn);
 }
 
-static void cmd_pwd(dmftp_connection_t* c)
+static void cmd_pwd(ftpd_connection_t* c)
 {
     replyf(c, 257, "\"%s\" is the current directory", c->cwd);
 }
 
-static void cmd_type(dmftp_connection_t* c, const char* arg)
+static void cmd_type(ftpd_connection_t* c, const char* arg)
 {
     if (strcmp(arg, "I") == 0 || strcmp(arg, "L8") == 0)
     {
@@ -622,7 +620,7 @@ static void cmd_type(dmftp_connection_t* c, const char* arg)
     else if (strcmp(arg, "A") == 0)
     {
         /* Accepted but not actually translated - see this file's top
-         * comment / dmftp_server.c's known-limitations list. */
+         * comment / ftpd_server.c's known-limitations list. */
         c->binary_mode = false;
         reply(c, 200, "Type set to A");
     }
@@ -632,7 +630,7 @@ static void cmd_type(dmftp_connection_t* c, const char* arg)
     }
 }
 
-static void cmd_cwd(dmftp_connection_t* c, const char* arg)
+static void cmd_cwd(ftpd_connection_t* c, const char* arg)
 {
     char* virtual_path;
     char* real_path;
@@ -661,9 +659,9 @@ static void cmd_cwd(dmftp_connection_t* c, const char* arg)
 /** Drops a previous PASV/PORT's data connection that arrived (or was
  * opened) but never got claimed by a LIST/RETR/STOR - called before
  * starting a fresh PASV or PORT so a session can't leak one per re-try. */
-static void clear_stale_data_conn(dmftp_connection_t* c)
+static void clear_stale_data_conn(ftpd_connection_t* c)
 {
-    if (c->data_conn != NULL && c->data_op == dmftp_data_op_none)
+    if (c->data_conn != NULL && c->data_op == ftpd_data_op_none)
     {
         dmtcp_conn_t stale = c->data_conn;
         c->data_conn = NULL;
@@ -671,13 +669,13 @@ static void clear_stale_data_conn(dmftp_connection_t* c)
     }
 }
 
-static void cmd_pasv(dmftp_connection_t* c)
+static void cmd_pasv(ftpd_connection_t* c)
 {
     clear_stale_data_conn(c);
     c->port_pending = false; /* A fresh PASV supersedes any pending PORT. */
 
     uint16_t port;
-    if (dmftp_server_start_pasv(c, &port) != 0)
+    if (ftpd_server_start_pasv(c, &port) != 0)
     {
         reply(c, 425, "Cannot open passive connection");
         return;
@@ -688,7 +686,7 @@ static void cmd_pasv(dmftp_connection_t* c)
     if (dmtcp_conn_get_local_endpoint(c->control_conn, &local_addr, &local_port) != 0 ||
         local_addr.family != dmip_family_v4)
     {
-        dmftp_server_stop_pasv(c);
+        ftpd_server_stop_pasv(c);
         reply(c, 425, "Cannot open passive connection");
         return;
     }
@@ -704,13 +702,13 @@ static void cmd_pasv(dmftp_connection_t* c)
  * actively connect for its *next* data transfer.
  *
  * The given address is required to match the control connection's own
- * peer exactly - see this file's top comment (dmftp_server.c) for why:
+ * peer exactly - see this file's top comment (ftpd_server.c) for why:
  * without that check, PORT would let any client point our outbound data
  * connection at an arbitrary third host, the classic "FTP bounce" abuse.
  * The actual dmtcp_connect() happens later, from whichever LIST/RETR/STOR
  * uses this - see start_data_transfer().
  */
-static void cmd_port(dmftp_connection_t* c, const char* arg)
+static void cmd_port(ftpd_connection_t* c, const char* arg)
 {
     unsigned int h1, h2, h3, h4, p1, p2;
     int fields = Dmod_Sscanf(arg, "%u,%u,%u,%u,%u,%u", &h1, &h2, &h3, &h4, &p1, &p2);
@@ -732,7 +730,7 @@ static void cmd_port(dmftp_connection_t* c, const char* arg)
     }
 
     clear_stale_data_conn(c);
-    dmftp_server_stop_pasv(c); /* A fresh PORT supersedes any pending PASV. */
+    ftpd_server_stop_pasv(c); /* A fresh PORT supersedes any pending PASV. */
 
     c->port_addr = peer_addr;
     c->port_port = (uint16_t)(p1 * 256u + p2);
@@ -760,14 +758,14 @@ static const char* strip_list_flags(const char* arg)
     return arg;
 }
 
-static void cmd_list(dmftp_connection_t* c, const char* arg, dmftp_data_op_t op)
+static void cmd_list(ftpd_connection_t* c, const char* arg, ftpd_data_op_t op)
 {
     if (c->data_conn == NULL && !c->pasv_pending && !c->port_pending)
     {
         reply(c, 425, "Use PASV or PORT first");
         return;
     }
-    if (c->data_op != dmftp_data_op_none)
+    if (c->data_op != ftpd_data_op_none)
     {
         reply(c, 450, "Another transfer is already in progress");
         return;
@@ -784,7 +782,7 @@ static void cmd_list(dmftp_connection_t* c, const char* arg, dmftp_data_op_t op)
 
     uint8_t* buffer = NULL;
     size_t len = 0;
-    bool ok = render_listing(real_path, op == dmftp_data_op_nlst, &buffer, &len);
+    bool ok = render_listing(real_path, op == ftpd_data_op_nlst, &buffer, &len);
     Dmod_Free(real_path);
 
     if (!ok)
@@ -807,14 +805,14 @@ static void cmd_list(dmftp_connection_t* c, const char* arg, dmftp_data_op_t op)
     reply(c, 150, "Here comes the directory listing");
 }
 
-static void cmd_retr(dmftp_connection_t* c, const char* arg)
+static void cmd_retr(ftpd_connection_t* c, const char* arg)
 {
     if (c->data_conn == NULL && !c->pasv_pending && !c->port_pending)
     {
         reply(c, 425, "Use PASV or PORT first");
         return;
     }
-    if (c->data_op != dmftp_data_op_none)
+    if (c->data_op != ftpd_data_op_none)
     {
         reply(c, 450, "Another transfer is already in progress");
         return;
@@ -835,7 +833,7 @@ static void cmd_retr(dmftp_connection_t* c, const char* arg)
         return;
     }
 
-    c->data_op = dmftp_data_op_retr;
+    c->data_op = ftpd_data_op_retr;
     c->transfer_file = file;
 
     if (!start_data_transfer(c))
@@ -847,14 +845,14 @@ static void cmd_retr(dmftp_connection_t* c, const char* arg)
     reply(c, 150, "Opening binary mode data connection for file transfer");
 }
 
-static void cmd_stor(dmftp_connection_t* c, const char* arg)
+static void cmd_stor(ftpd_connection_t* c, const char* arg)
 {
     if (c->data_conn == NULL && !c->pasv_pending && !c->port_pending)
     {
         reply(c, 425, "Use PASV or PORT first");
         return;
     }
-    if (c->data_op != dmftp_data_op_none)
+    if (c->data_op != ftpd_data_op_none)
     {
         reply(c, 450, "Another transfer is already in progress");
         return;
@@ -875,7 +873,7 @@ static void cmd_stor(dmftp_connection_t* c, const char* arg)
         return;
     }
 
-    c->data_op = dmftp_data_op_stor;
+    c->data_op = ftpd_data_op_stor;
     c->transfer_file = file;
 
     if (!start_data_transfer(c))
@@ -887,7 +885,7 @@ static void cmd_stor(dmftp_connection_t* c, const char* arg)
     reply(c, 150, "Ready to receive file");
 }
 
-static void cmd_dele(dmftp_connection_t* c, const char* arg)
+static void cmd_dele(ftpd_connection_t* c, const char* arg)
 {
     char* virtual_path;
     char* real_path;
@@ -901,7 +899,7 @@ static void cmd_dele(dmftp_connection_t* c, const char* arg)
     reply(c, ok ? 250 : 550, ok ? "File deleted" : "Delete failed");
 }
 
-static void cmd_mkd(dmftp_connection_t* c, const char* arg)
+static void cmd_mkd(ftpd_connection_t* c, const char* arg)
 {
     char* virtual_path;
     char* real_path;
@@ -919,7 +917,7 @@ static void cmd_mkd(dmftp_connection_t* c, const char* arg)
     Dmod_Free(virtual_path);
 }
 
-static void cmd_rmd(dmftp_connection_t* c, const char* arg)
+static void cmd_rmd(ftpd_connection_t* c, const char* arg)
 {
     char* virtual_path;
     char* real_path;
@@ -933,7 +931,7 @@ static void cmd_rmd(dmftp_connection_t* c, const char* arg)
     reply(c, ok ? 250 : 550, ok ? "Directory removed" : "Remove directory failed");
 }
 
-static void cmd_size(dmftp_connection_t* c, const char* arg)
+static void cmd_size(ftpd_connection_t* c, const char* arg)
 {
     char* virtual_path;
     char* real_path;
@@ -955,7 +953,7 @@ static void cmd_size(dmftp_connection_t* c, const char* arg)
     replyf(c, 213, "%lu", size);
 }
 
-static void cmd_abor(dmftp_connection_t* c)
+static void cmd_abor(ftpd_connection_t* c)
 {
     dmtcp_conn_t victim = c->data_conn;
     finish_transfer(c, 226, "ABOR command successful");
@@ -963,12 +961,12 @@ static void cmd_abor(dmftp_connection_t* c)
         dmtcp_abort(victim);
 }
 
-void dmftp_handle_command(dmftp_t engine, const char* verb, const char* arg, void* user_data)
+void ftpd_handle_command(libftp_t engine, const char* verb, const char* arg, void* user_data)
 {
     (void)engine;
-    dmftp_connection_t* c = user_data;
+    ftpd_connection_t* c = user_data;
 
-    DMOD_LOG_INFO("dmftp: <%p> -> %s %s\n", (void*)c, verb, arg);
+    DMOD_LOG_INFO("ftpd: <%p> -> %s %s\n", (void*)c, verb, arg);
 
     /* Allowed before login, per RFC 959. */
     if (strcmp(verb, "USER") == 0) { cmd_user(c, arg); return; }
@@ -989,8 +987,8 @@ void dmftp_handle_command(dmftp_t engine, const char* verb, const char* arg, voi
     if (strcmp(verb, "TYPE") == 0) { cmd_type(c, arg); return; }
     if (strcmp(verb, "PASV") == 0) { cmd_pasv(c); return; }
     if (strcmp(verb, "PORT") == 0) { cmd_port(c, arg); return; }
-    if (strcmp(verb, "LIST") == 0) { cmd_list(c, arg, dmftp_data_op_list); return; }
-    if (strcmp(verb, "NLST") == 0) { cmd_list(c, arg, dmftp_data_op_nlst); return; }
+    if (strcmp(verb, "LIST") == 0) { cmd_list(c, arg, ftpd_data_op_list); return; }
+    if (strcmp(verb, "NLST") == 0) { cmd_list(c, arg, ftpd_data_op_nlst); return; }
     if (strcmp(verb, "RETR") == 0) { cmd_retr(c, arg); return; }
     if (strcmp(verb, "STOR") == 0) { cmd_stor(c, arg); return; }
     if (strcmp(verb, "DELE") == 0) { cmd_dele(c, arg); return; }
