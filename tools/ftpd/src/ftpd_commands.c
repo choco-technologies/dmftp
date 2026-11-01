@@ -322,15 +322,14 @@ static void send_list_chunk(ftpd_connection_t* c)
             return;
         }
 
-        int space = dmtcp_send_space(c->data_conn);
-        if (space <= 0)
-            return; /* Wait for ftpd_data_on_writable() */
-
-        size_t remaining = c->list_len - c->list_sent;
-        size_t want = ((size_t)space < remaining) ? (size_t)space : remaining;
+        /* No dmtcp_send_space() check first: on_writable is edge-triggered
+         * (see dmtcp.h) - only a short dmtcp_send(), the zero-byte one with
+         * a full buffer included, arms it. Returning on "no space" without
+         * sending would wait for a callback that never comes. */
+        size_t want = c->list_len - c->list_sent;
 
         int sent = dmtcp_send(c->data_conn, c->list_buffer + c->list_sent, want);
-        if (sent <= 0)
+        if (sent < 0)
             return;
 
         c->list_sent += (size_t)sent;
@@ -345,12 +344,9 @@ static void send_retr_chunk(ftpd_connection_t* c)
 
     for (;;)
     {
-        int space = dmtcp_send_space(c->data_conn);
-        if (space <= 0)
-            return; /* Wait for ftpd_data_on_writable() */
-
-        size_t want = ((size_t)space < sizeof(chunk)) ? (size_t)space : sizeof(chunk);
-        size_t got = Dmod_FileRead(chunk, 1, want, c->transfer_file);
+        /* Sent as long as dmtcp takes it all - see send_list_chunk() for why
+         * there is no dmtcp_send_space() check first */
+        size_t got = Dmod_FileRead(chunk, 1, sizeof(chunk), c->transfer_file);
         if (got == 0)
         {
             c->transfer_ok = true;
@@ -364,9 +360,8 @@ static void send_retr_chunk(ftpd_connection_t* c)
 
         if ((size_t)sent < got)
         {
-            /* dmtcp_send_space() only guarantees a full accept "from this
-             * thread" (see dmtcp.h) - defensively rewind the unsent tail
-             * so it is re-read on the next attempt instead of being lost. */
+            /* The buffer is full: rewind the unsent tail so it is re-read
+             * by ftpd_data_on_writable(), which this short write armed. */
             Dmod_FileSeek(c->transfer_file, -(long)(got - (size_t)sent), DMOD_SEEK_CUR);
             return;
         }
