@@ -68,6 +68,7 @@ typedef struct
     uint8_t*         list_buffer;     /**< Rendered LIST/NLST text, for those two ops */
     size_t           list_len;
     size_t           list_sent;
+    bool             write_failed;    /**< Sticky until cleanup: a failed write must never become 226 at FIN */
     bool             transfer_ok;     /**< Set once a transfer has legitimately finished - see the data terminal callbacks */
 } ftpd_connection_t;
 

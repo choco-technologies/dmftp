@@ -299,6 +299,7 @@ static void cleanup_transfer_state(ftpd_connection_t* c)
     c->data_op = ftpd_data_op_none;
     c->data_conn = NULL;
     c->transfer_ok = false;
+    c->write_failed = false;
 }
 
 /** Cleans up and always replies - used where a reply is unconditionally
@@ -412,14 +413,28 @@ void ftpd_data_on_data(dmtcp_conn_t conn, const uint8_t* data, size_t data_len, 
          * only replies at all if data_op says a transfer was actually
          * requested. */
         if (c->data_op == ftpd_data_op_stor)
-            c->transfer_ok = true;
+            c->transfer_ok = !c->write_failed;
         dmtcp_close(conn);
         return;
     }
 
-    if (c->data_op == ftpd_data_op_stor && c->transfer_file != NULL)
+    if (c->data_op == ftpd_data_op_stor && c->transfer_file != NULL && !c->write_failed)
     {
-        Dmod_FileWrite(data, 1, data_len, c->transfer_file);
+        size_t offset = 0;
+        while (offset < data_len)
+        {
+            size_t written = Dmod_FileWrite(data + offset, 1, data_len - offset, c->transfer_file);
+            if (written == 0 || written > data_len - offset)
+            {
+                c->write_failed = true;
+                break;
+            }
+            offset += written;
+        }
+        /* Drain a failed upload without further writes. Closing/aborting the
+         * TCP handle here would invalidate the RX callback's borrowed handle.
+         * FIN still closes the channel; its terminal callback reports 451.
+         */
     }
 }
 
@@ -460,7 +475,9 @@ void ftpd_data_on_closed(dmtcp_conn_t conn, void* user_data)
     if (c->data_conn != conn)
         return;
 
-    if (c->transfer_ok)
+    if (c->write_failed)
+        end_data_connection(c, 451, "Write failed; transfer aborted");
+    else if (c->transfer_ok)
         end_data_connection(c, 226, "Transfer complete");
     else
         end_data_connection(c, 426, "Connection closed; transfer aborted");
@@ -500,7 +517,7 @@ void ftpd_data_on_established(dmtcp_conn_t conn, void* user_data)
 /**
  * Arranges (or confirms) the data connection a just-prepared LIST/NLST/
  * RETR/STOR needs, once `c->data_op` is already set:
- *   - PASV, already connected (c->data_conn set): kick off sending now.
+ *   - PASV, already connected (c->data_conn set): the caller sends 150 before kicking off data.
  *   - PASV, still waiting for the client to connect: nothing to do here -
  *     pasv_on_accept() calls ftpd_data_begin() once it arrives.
  *   - PORT: actively connect now.
@@ -512,10 +529,7 @@ void ftpd_data_on_established(dmtcp_conn_t conn, void* user_data)
 static bool start_data_transfer(ftpd_connection_t* c)
 {
     if (c->data_conn != NULL)
-    {
-        ftpd_data_begin(c);
         return true;
-    }
     if (c->port_pending)
         return ftpd_server_connect_port(c) == 0;
 
@@ -798,6 +812,8 @@ static void cmd_list(ftpd_connection_t* c, const char* arg, ftpd_data_op_t op)
         return;
     }
     reply(c, 150, "Here comes the directory listing");
+    if (c->data_conn != NULL && dmtcp_conn_get_state(c->data_conn) == dmtcp_state_established)
+        ftpd_data_begin(c);
 }
 
 static void cmd_retr(ftpd_connection_t* c, const char* arg)
@@ -838,6 +854,8 @@ static void cmd_retr(ftpd_connection_t* c, const char* arg)
         return;
     }
     reply(c, 150, "Opening binary mode data connection for file transfer");
+    if (c->data_conn != NULL && dmtcp_conn_get_state(c->data_conn) == dmtcp_state_established)
+        ftpd_data_begin(c);
 }
 
 static void cmd_stor(ftpd_connection_t* c, const char* arg)
@@ -878,6 +896,8 @@ static void cmd_stor(ftpd_connection_t* c, const char* arg)
         return;
     }
     reply(c, 150, "Ready to receive file");
+    if (c->data_conn != NULL && dmtcp_conn_get_state(c->data_conn) == dmtcp_state_established)
+        ftpd_data_begin(c);
 }
 
 static void cmd_dele(ftpd_connection_t* c, const char* arg)

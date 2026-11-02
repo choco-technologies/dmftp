@@ -102,3 +102,12 @@ service=ftpd@public.ini` (and, to also ship the template,
 [dmod-boot's dmod-boot skill](https://github.com/choco-technologies/dmod-boot)
 and `dmf-get`'s `--config-map` docs for how the `service=` tag routes a
 config file to `/configs/services/<module>/<file>`.
+
+## Transfer failures
+
+STOR retries positive short file writes. Once a write makes no progress,
+it discards the rest of that upload and reports `451 Write failed; transfer
+aborted` when the data connection closes; a later FIN cannot turn the error
+into `226`. The partial destination is left in place. LIST/RETR send their
+`150` preliminary response before beginning to send data, including for an
+already-connected passive channel.

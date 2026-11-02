@@ -30,3 +30,13 @@ if(DMF_GET_EXECUTABLE AND DMOD_LOADER_EXECUTABLE)
 else()
     message(WARNING "dmf-get/dmod_loader not found - 'ctest' will not run ${DMOD_MODULE_NAME}. Build the tools first with -DDMOD_BUILD_TOOLS=ON")
 endif()
+
+# Scripted imported APIs exercise the real FTP server callbacks on the host.
+if(DMOD_TOOLS_NAME STREQUAL "arch/x86_64")
+    add_executable(test_ftpd_transfers ftpd_transfers_test.c)
+    target_compile_definitions(test_ftpd_transfers PRIVATE DMOD_CURRENT_ALLOCATOR="test_ftpd_transfers")
+    get_target_property(FTPD_INCLUDES ftpd INCLUDE_DIRECTORIES)
+    target_include_directories(test_ftpd_transfers PRIVATE ${FTPD_INCLUDES})
+    target_link_libraries(test_ftpd_transfers PRIVATE libftp_if dmod_inc)
+    add_test(NAME ftpd_transfers COMMAND test_ftpd_transfers)
+endif()

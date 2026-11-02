@@ -42,3 +42,6 @@ jobs:
           export DMOD_DMF_DIR=$(pwd)/build/dmf
           dmf-get install -d ${DMOD_DMF_DIR}/test_libftp-local.dmd -y
           dmod_loader build/dmf/test_libftp.dmf
+
+      - name: Test file-transfer failure handling
+        run: ctest --test-dir build -R ftpd_transfers --output-on-failure
