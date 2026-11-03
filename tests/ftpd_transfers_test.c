@@ -26,6 +26,7 @@ static size_t write_file(const void* data, size_t size, size_t count, void* file
 }
 static void* allocate(size_t n, const char* owner) { (void)owner; return malloc(n); }
 static void release(void* p, bool merge) { (void)merge; free(p); }
+static void yield_thread(uint32_t ms) { (void)ms; }
 static bool logging(Dmod_LogLevel_t level) { (void)level; return false; }
 static void close_file(void* file) { (void)file; file_closes++; }
 static void* open_file(const char* path, const char* mode) { (void)path; (void)mode; return &session; }
@@ -101,6 +102,7 @@ static void reset(const size_t* writes, size_t n)
     Dmod_FileWrite=write_file; Dmod_FileClose=close_file;
     Dmod_FileOpen=open_file; Dmod_FileRead=read_file; Dmod_FileSeek=seek_file;
     libftp_reply=capture_reply;
+    dmosi_thread_sleep=yield_thread;
     dmtcp_close=close_tcp; dmtcp_send=send_tcp; dmtcp_conn_get_state=state_tcp;
 }
 static void finish(void)

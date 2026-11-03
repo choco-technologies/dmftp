@@ -30,7 +30,8 @@
 
 static void print_usage(const char* prog)
 {
-    Dmod_Printf("Usage: %s [--port N] [--root PATH] [--user NAME] [--pass SECRET]\n", prog);
+    Dmod_Printf("Usage: %s [--port N] [--root PATH] [--user NAME] [--pass SECRET] [--data-yield MS]\n", prog);
+    Dmod_Printf("  --data-yield MS  Scheduler break after file data (0..1000, default: 0)\n");
     Dmod_Printf("  --port N       TCP port to listen on (default: %u)\n", (unsigned)FTPD_DEFAULT_PORT);
     Dmod_Printf("  --root PATH    Virtual filesystem root to serve (default: /)\n");
     Dmod_Printf("  --user NAME    Required username, or \"anonymous\" to accept any (default: anonymous)\n");
@@ -43,6 +44,7 @@ int main(int argc, char *argv[])
     const char* root = "/";
     const char* user = "anonymous";
     const char* pass = "";
+    uint32_t data_yield_ms = 0;
 
     for (int i = 1; i < argc; i++)
     {
@@ -53,6 +55,13 @@ int main(int argc, char *argv[])
             unsigned int value;
             if (Dmod_Sscanf(argv[++i], "%u", &value) == 1 && value <= 65535u)
                 port = (uint16_t)value;
+        }
+        else if (strcmp(argv[i], "--data-yield") == 0 && have_value)
+        {
+            unsigned int value;
+            if (Dmod_Sscanf(argv[++i], "%u", &value) != 1 || value > 1000u)
+                return -EINVAL;
+            data_yield_ms = value;
         }
         else if (strcmp(argv[i], "--root") == 0 && have_value)
         {
@@ -79,7 +88,7 @@ int main(int argc, char *argv[])
         }
     }
 
-    int ret = ftpd_server_start(port, root, user, pass);
+    int ret = ftpd_server_start(port, root, user, pass, data_yield_ms);
     if (ret != 0)
     {
         DMOD_LOG_ERROR("ftpd: failed to start (error %d)\n", ret);

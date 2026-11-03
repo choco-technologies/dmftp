@@ -375,6 +375,7 @@ void ftpd_data_begin(ftpd_connection_t* c)
         break;
     case ftpd_data_op_retr:
         send_retr_chunk(c);
+        dmosi_thread_sleep(g_ftpd_context->data_yield_ms); /* Give ready UI work a scheduling opportunity. */
         break;
     case ftpd_data_op_stor:
         break; /* Nothing to do yet - wait for ftpd_data_on_data() */
@@ -448,7 +449,10 @@ void ftpd_data_on_data(dmtcp_conn_t conn, const uint8_t* data, size_t data_len, 
     }
 
     if (c->data_op == ftpd_data_op_stor && c->transfer_file != NULL && !c->write_failed)
+    {
         receive_stor_data(c, data, data_len);
+        dmosi_thread_sleep(g_ftpd_context->data_yield_ms);
+    }
     /* Drain a failed upload without further writes. Do not invalidate the RX
      * callback's borrowed TCP handle; FIN closes it and reports 451. */
 
@@ -464,7 +468,10 @@ void ftpd_data_on_writable(dmtcp_conn_t conn, size_t space, void* user_data)
     if (c->data_op == ftpd_data_op_list || c->data_op == ftpd_data_op_nlst)
         send_list_chunk(c);
     else if (c->data_op == ftpd_data_op_retr)
+    {
         send_retr_chunk(c);
+        dmosi_thread_sleep(g_ftpd_context->data_yield_ms);
+    }
 }
 
 /**
