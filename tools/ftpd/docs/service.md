@@ -118,9 +118,3 @@ TCP payloads into 4 KiB writes and flushes the final partial block before
 marking the upload successful. Buffer allocation failures return 451
 before data starts. Memory is bounded to one transfer buffer per active
 file transfer, independent of file size.
-
-`--data-yield MS` controls a scheduler break after file-data callbacks
-(0..1000 ms, default 0: only yield). The public-service preset uses 50 ms
-to leave CPU time for foreground UI on small boards. Set 0 on instances
-where transfer speed takes precedence. The value is per callback; it is
-not a guaranteed transfer-rate limit.

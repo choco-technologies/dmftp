@@ -76,7 +76,6 @@ typedef struct
 struct ftpd_context
 {
     uint16_t control_port;
-    uint32_t data_yield_ms; /**< Scheduler break after a file-data callback; 0 only yields. */
     char*    root;   /**< Configured virtual filesystem root, e.g. "/" - trailing slash stripped except for "/" itself */
     char*    user;   /**< Configured username; "anonymous" (case-insensitive) means any USER/PASS is accepted */
     char*    pass;   /**< Configured password; "" means any password is accepted for `user` */
@@ -158,6 +157,6 @@ int ftpd_server_connect_port(ftpd_connection_t* c);
  * @return 0 on success, -ENOMEM on allocation failure, or a negative
  *         dmtcp_listen() error (e.g. -EADDRINUSE) if `port` is taken
  */
-int ftpd_server_start(uint16_t port, const char* root, const char* user, const char* pass, uint32_t data_yield_ms);
+int ftpd_server_start(uint16_t port, const char* root, const char* user, const char* pass);
 
 #endif // FTPD_INTERNAL_H

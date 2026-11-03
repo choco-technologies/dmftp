@@ -411,7 +411,7 @@ static void control_on_accept(dmtcp_conn_t conn, const dmip_addr_t* peer, uint16
  *         another negative dmtcp_listen() error) if `port` is already in
  *         use
  */
-int ftpd_server_start(uint16_t port, const char* root, const char* user, const char* pass, uint32_t data_yield_ms)
+int ftpd_server_start(uint16_t port, const char* root, const char* user, const char* pass)
 {
     struct ftpd_context* ctx = Dmod_Malloc(sizeof(*ctx));
     if (ctx == NULL)
@@ -419,7 +419,6 @@ int ftpd_server_start(uint16_t port, const char* root, const char* user, const c
     memset(ctx, 0, sizeof(*ctx));
 
     ctx->control_port = port;
-    ctx->data_yield_ms = data_yield_ms;
     ctx->root = normalize_root(root);
     ctx->user = Dmod_StrDup(user);
     ctx->pass = Dmod_StrDup(pass);

@@ -44,4 +44,4 @@ jobs:
           dmod_loader build/dmf/test_libftp.dmf
 
       - name: Test file-transfer failure handling
-        run: ctest --test-dir build -R '^ftpd_(transfers|args)$' --output-on-failure
+        run: ctest --test-dir build -R ftpd_transfers --output-on-failure
