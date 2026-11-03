@@ -50,7 +50,5 @@ dmod_link_modules(${DMOD_MODULE_NAME}
     dmosi
 )
 
-# No tests/ here - ftpd is dmtcp/filesystem-backed integration glue,
-# exercised on real hardware instead, exactly like telnetd.c (its closest
-# analog in this ecosystem) has no test suite of its own either. libftp's
-# actual protocol logic is what tests/ (at the repo root) covers.
+# Host tests in the root tests/ compile the production transfer callbacks
+# with scripted file/TCP imports. Network integration is also tested on STM32.

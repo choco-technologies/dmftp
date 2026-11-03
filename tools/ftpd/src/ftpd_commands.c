@@ -292,13 +292,14 @@ static void cleanup_transfer_state(ftpd_connection_t* c)
         Dmod_FileClose(c->transfer_file);
         c->transfer_file = NULL;
     }
-    Dmod_Free(c->list_buffer);
-    c->list_buffer = NULL;
-    c->list_len = 0;
-    c->list_sent = 0;
+    Dmod_Free(c->transfer_buffer);
+    c->transfer_buffer = NULL;
+    c->buffer_len = 0;
+    c->buffer_sent = 0;
     c->data_op = ftpd_data_op_none;
     c->data_conn = NULL;
     c->transfer_ok = false;
+    c->write_failed = false;
 }
 
 /** Cleans up and always replies - used where a reply is unconditionally
@@ -315,7 +316,7 @@ static void send_list_chunk(ftpd_connection_t* c)
 {
     for (;;)
     {
-        if (c->list_sent >= c->list_len)
+        if (c->buffer_sent >= c->buffer_len)
         {
             c->transfer_ok = true;
             dmtcp_close(c->data_conn);
@@ -326,13 +327,13 @@ static void send_list_chunk(ftpd_connection_t* c)
          * (see dmtcp.h) - only a short dmtcp_send(), the zero-byte one with
          * a full buffer included, arms it. Returning on "no space" without
          * sending would wait for a callback that never comes. */
-        size_t want = c->list_len - c->list_sent;
+        size_t want = c->buffer_len - c->buffer_sent;
 
-        int sent = dmtcp_send(c->data_conn, c->list_buffer + c->list_sent, want);
+        int sent = dmtcp_send(c->data_conn, c->transfer_buffer + c->buffer_sent, want);
         if (sent < 0)
             return;
 
-        c->list_sent += (size_t)sent;
+        c->buffer_sent += (size_t)sent;
         if ((size_t)sent < want)
             return; /* Short write - wait for ftpd_data_on_writable() */
     }
@@ -340,31 +341,27 @@ static void send_list_chunk(ftpd_connection_t* c)
 
 static void send_retr_chunk(ftpd_connection_t* c)
 {
-    uint8_t chunk[FTPD_DATA_CHUNK_SIZE];
-
     for (;;)
     {
-        /* Sent as long as dmtcp takes it all - see send_list_chunk() for why
-         * there is no dmtcp_send_space() check first */
-        size_t got = Dmod_FileRead(chunk, 1, sizeof(chunk), c->transfer_file);
-        if (got == 0)
+        if (c->buffer_sent == c->buffer_len)
         {
-            c->transfer_ok = true;
-            dmtcp_close(c->data_conn);
-            return;
+            c->buffer_len = Dmod_FileRead(c->transfer_buffer, 1, FTPD_DATA_CHUNK_SIZE, c->transfer_file);
+            c->buffer_sent = 0;
+            if (c->buffer_len == 0)
+            {
+                c->transfer_ok = true;
+                dmtcp_close(c->data_conn);
+                return;
+            }
         }
 
-        int sent = dmtcp_send(c->data_conn, chunk, got);
+        size_t want = c->buffer_len - c->buffer_sent;
+        int sent = dmtcp_send(c->data_conn, c->transfer_buffer + c->buffer_sent, want);
         if (sent < 0)
-            sent = 0;
-
-        if ((size_t)sent < got)
-        {
-            /* The buffer is full: rewind the unsent tail so it is re-read
-             * by ftpd_data_on_writable(), which this short write armed. */
-            Dmod_FileSeek(c->transfer_file, -(long)(got - (size_t)sent), DMOD_SEEK_CUR);
             return;
-        }
+        c->buffer_sent += (size_t)sent;
+        if ((size_t)sent < want)
+            return; /* Keep the unsent tail until on_writable; never rewind the file. */
     }
 }
 
@@ -394,6 +391,35 @@ void ftpd_data_begin(ftpd_connection_t* c)
     }
 }
 
+static void flush_stor_buffer(ftpd_connection_t* c)
+{
+    size_t offset = 0;
+    while (offset < c->buffer_len && !c->write_failed)
+    {
+        size_t written = Dmod_FileWrite(c->transfer_buffer + offset, 1, c->buffer_len - offset, c->transfer_file);
+        if (written == 0 || written > c->buffer_len - offset)
+            c->write_failed = true;
+        else
+            offset += written;
+    }
+    c->buffer_len = 0;
+}
+
+static void receive_stor_data(ftpd_connection_t* c, const uint8_t* data, size_t len)
+{
+    while (len > 0 && !c->write_failed)
+    {
+        size_t room = FTPD_STOR_CHUNK_SIZE - c->buffer_len;
+        size_t chunk = len < room ? len : room;
+        memcpy(c->transfer_buffer + c->buffer_len, data, chunk);
+        c->buffer_len += chunk;
+        data += chunk;
+        len -= chunk;
+        if (c->buffer_len == FTPD_STOR_CHUNK_SIZE)
+            flush_stor_buffer(c);
+    }
+}
+
 void ftpd_data_on_data(dmtcp_conn_t conn, const uint8_t* data, size_t data_len, void* user_data)
 {
     ftpd_connection_t* c = user_data;
@@ -412,15 +438,20 @@ void ftpd_data_on_data(dmtcp_conn_t conn, const uint8_t* data, size_t data_len, 
          * only replies at all if data_op says a transfer was actually
          * requested. */
         if (c->data_op == ftpd_data_op_stor)
-            c->transfer_ok = true;
+        {
+            if (!c->write_failed)
+                flush_stor_buffer(c);
+            c->transfer_ok = !c->write_failed;
+        }
         dmtcp_close(conn);
         return;
     }
 
-    if (c->data_op == ftpd_data_op_stor && c->transfer_file != NULL)
-    {
-        Dmod_FileWrite(data, 1, data_len, c->transfer_file);
-    }
+    if (c->data_op == ftpd_data_op_stor && c->transfer_file != NULL && !c->write_failed)
+        receive_stor_data(c, data, data_len);
+    /* Drain a failed upload without further writes. Do not invalidate the RX
+     * callback's borrowed TCP handle; FIN closes it and reports 451. */
+
 }
 
 void ftpd_data_on_writable(dmtcp_conn_t conn, size_t space, void* user_data)
@@ -460,7 +491,9 @@ void ftpd_data_on_closed(dmtcp_conn_t conn, void* user_data)
     if (c->data_conn != conn)
         return;
 
-    if (c->transfer_ok)
+    if (c->write_failed)
+        end_data_connection(c, 451, "Write failed; transfer aborted");
+    else if (c->transfer_ok)
         end_data_connection(c, 226, "Transfer complete");
     else
         end_data_connection(c, 426, "Connection closed; transfer aborted");
@@ -500,7 +533,7 @@ void ftpd_data_on_established(dmtcp_conn_t conn, void* user_data)
 /**
  * Arranges (or confirms) the data connection a just-prepared LIST/NLST/
  * RETR/STOR needs, once `c->data_op` is already set:
- *   - PASV, already connected (c->data_conn set): kick off sending now.
+ *   - PASV, already connected (c->data_conn set): the caller sends 150 before kicking off data.
  *   - PASV, still waiting for the client to connect: nothing to do here -
  *     pasv_on_accept() calls ftpd_data_begin() once it arrives.
  *   - PORT: actively connect now.
@@ -512,10 +545,7 @@ void ftpd_data_on_established(dmtcp_conn_t conn, void* user_data)
 static bool start_data_transfer(ftpd_connection_t* c)
 {
     if (c->data_conn != NULL)
-    {
-        ftpd_data_begin(c);
         return true;
-    }
     if (c->port_pending)
         return ftpd_server_connect_port(c) == 0;
 
@@ -532,10 +562,10 @@ static void discard_prepared_transfer(ftpd_connection_t* c)
         Dmod_FileClose(c->transfer_file);
         c->transfer_file = NULL;
     }
-    Dmod_Free(c->list_buffer);
-    c->list_buffer = NULL;
-    c->list_len = 0;
-    c->list_sent = 0;
+    Dmod_Free(c->transfer_buffer);
+    c->transfer_buffer = NULL;
+    c->buffer_len = 0;
+    c->buffer_sent = 0;
     c->data_op = ftpd_data_op_none;
 }
 
@@ -787,9 +817,9 @@ static void cmd_list(ftpd_connection_t* c, const char* arg, ftpd_data_op_t op)
     }
 
     c->data_op = op;
-    c->list_buffer = buffer;
-    c->list_len = len;
-    c->list_sent = 0;
+    c->transfer_buffer = buffer;
+    c->buffer_len = len;
+    c->buffer_sent = 0;
 
     if (!start_data_transfer(c))
     {
@@ -798,6 +828,25 @@ static void cmd_list(ftpd_connection_t* c, const char* arg, ftpd_data_op_t op)
         return;
     }
     reply(c, 150, "Here comes the directory listing");
+    if (c->data_conn != NULL && dmtcp_conn_get_state(c->data_conn) == dmtcp_state_established)
+        ftpd_data_begin(c);
+}
+
+static bool prepare_file_buffer(ftpd_connection_t* c, void* file, ftpd_data_op_t op)
+{
+    size_t capacity = (op == ftpd_data_op_stor) ? FTPD_STOR_CHUNK_SIZE : FTPD_DATA_CHUNK_SIZE;
+    uint8_t* buffer = Dmod_Malloc(capacity);
+    if (buffer == NULL)
+    {
+        Dmod_FileClose(file);
+        reply(c, 451, "Local error in processing");
+        return false;
+    }
+    c->data_op = op;
+    c->transfer_file = file;
+    c->transfer_buffer = buffer;
+    c->buffer_len = c->buffer_sent = 0;
+    return true;
 }
 
 static void cmd_retr(ftpd_connection_t* c, const char* arg)
@@ -828,8 +877,8 @@ static void cmd_retr(ftpd_connection_t* c, const char* arg)
         return;
     }
 
-    c->data_op = ftpd_data_op_retr;
-    c->transfer_file = file;
+    if (!prepare_file_buffer(c, file, ftpd_data_op_retr))
+        return;
 
     if (!start_data_transfer(c))
     {
@@ -838,6 +887,8 @@ static void cmd_retr(ftpd_connection_t* c, const char* arg)
         return;
     }
     reply(c, 150, "Opening binary mode data connection for file transfer");
+    if (c->data_conn != NULL && dmtcp_conn_get_state(c->data_conn) == dmtcp_state_established)
+        ftpd_data_begin(c);
 }
 
 static void cmd_stor(ftpd_connection_t* c, const char* arg)
@@ -868,8 +919,8 @@ static void cmd_stor(ftpd_connection_t* c, const char* arg)
         return;
     }
 
-    c->data_op = ftpd_data_op_stor;
-    c->transfer_file = file;
+    if (!prepare_file_buffer(c, file, ftpd_data_op_stor))
+        return;
 
     if (!start_data_transfer(c))
     {
@@ -878,6 +929,8 @@ static void cmd_stor(ftpd_connection_t* c, const char* arg)
         return;
     }
     reply(c, 150, "Ready to receive file");
+    if (c->data_conn != NULL && dmtcp_conn_get_state(c->data_conn) == dmtcp_state_established)
+        ftpd_data_begin(c);
 }
 
 static void cmd_dele(ftpd_connection_t* c, const char* arg)
