@@ -20,7 +20,8 @@
 
 #define FTPD_MAX_CONNECTIONS   4u
 #define FTPD_DEFAULT_PORT      21u
-#define FTPD_DATA_CHUNK_SIZE   512u
+#define FTPD_DATA_CHUNK_SIZE   4096u
+#define FTPD_STOR_CHUNK_SIZE   4096u
 
 /** Conventional FTP data-connection source port (RFC 959 §3.2) for an
  * active-mode (PORT) transfer - see ftpd_server_connect_port(). */
@@ -65,9 +66,9 @@ typedef struct
     ftpd_data_op_t data_op;
     dmtcp_conn_t     data_conn;
     void*            transfer_file;   /**< Dmod_FileOpen() handle, for RETR/STOR */
-    uint8_t*         list_buffer;     /**< Rendered LIST/NLST text, for those two ops */
-    size_t           list_len;
-    size_t           list_sent;
+    uint8_t*         transfer_buffer;     /**< LIST/NLST text or buffered RETR/STOR data */
+    size_t           buffer_len;
+    size_t           buffer_sent;
     bool             write_failed;    /**< Sticky until cleanup: a failed write must never become 226 at FIN */
     bool             transfer_ok;     /**< Set once a transfer has legitimately finished - see the data terminal callbacks */
 } ftpd_connection_t;

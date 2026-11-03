@@ -111,3 +111,10 @@ aborted` when the data connection closes; a later FIN cannot turn the error
 into `226`. The partial destination is left in place. LIST/RETR send their
 `150` preliminary response before beginning to send data, including for an
 already-connected passive channel.
+
+RETR keeps a 4 KiB chunk until TCP accepts every byte, instead of reading
+and rewinding the same file on each short send. STOR combines incoming
+TCP payloads into 4 KiB writes and flushes the final partial block before
+marking the upload successful. Buffer allocation failures return 451
+before data starts. Memory is bounded to one transfer buffer per active
+file transfer, independent of file size.

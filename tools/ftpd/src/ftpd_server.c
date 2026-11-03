@@ -140,10 +140,10 @@ void ftpd_connection_release(ftpd_connection_t* c)
         Dmod_FileClose(c->transfer_file);
         c->transfer_file = NULL;
     }
-    Dmod_Free(c->list_buffer);
-    c->list_buffer = NULL;
-    c->list_len = 0;
-    c->list_sent = 0;
+    Dmod_Free(c->transfer_buffer);
+    c->transfer_buffer = NULL;
+    c->buffer_len = 0;
+    c->buffer_sent = 0;
     c->data_op = ftpd_data_op_none;
 
     if (c->engine != NULL)
